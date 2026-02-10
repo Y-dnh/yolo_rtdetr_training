@@ -18,7 +18,7 @@ Pipeline для навчання, валідації та експорту мо�
 ## Структура проекту
 
 ```
-yolo_training/
+yolo_rtdetr_training/
 ├── train.py                 # Навчання + автоматичний ONNX експорт
 ├── validate.py              # Валідація на test split + звіти (JSON, Markdown)
 ├── export.py                # Експорт моделі (ONNX, TensorRT, OpenVINO, тощо)
@@ -47,12 +47,12 @@ yolo_training/
 ```bash
 # 1. Клонувати
 git clone <url>
-cd yolo_training
+cd yolo_rtdetr_training
 
 # 2. Віртуальне середовище
-python -m venv yolo_training_env
-yolo_training_env\Scripts\activate       # Windows
-# source yolo_training_env/bin/activate  # Linux/Mac
+python -m venv yolo_rtdetr_training_env
+yolo_rtdetr_training_env\Scripts\activate       # Windows
+# source yolo_rtdetr_training_env/bin/activate  # Linux/Mac
 
 # 3. Залежності
 pip install -r requirements.txt
@@ -211,12 +211,3 @@ EXPORT_CONFIG = {
 
 - **YOLO**: `box` + `cls` + `dfl` (Distribution Focal Loss)
 - **RT-DETR**: Hungarian matching + GIOU + L1 + Cross-Entropy (параметри `box` та `cls` спільні)
-
-## Особливості IR (тепловізійних) зображень
-
-Конфігурація аугментацій налаштована під специфіку тепловізійних зображень:
-
-- **HSV**: `hsv_h=0`, `hsv_s=0` (grayscale, немає кольору), `hsv_v=0.3` (варіація яскравості)
-- **Flip**: `flipud=0` (камера зверху, не перевертати), `fliplr=0.5`
-- **Геометрія**: мінімальні повороти (`degrees=5`), без перспективних спотворень
-- **BGR**: вимкнено (grayscale)
