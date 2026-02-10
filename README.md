@@ -1,260 +1,222 @@
-# YOLO IR Detection Training Pipeline
+# YOLO / RT-DETR — IR Detection Training Pipeline
 
-A complete pipeline for training YOLO models. This project includes tools for COCO to YOLO format conversion, dataset preparation, model training/validation, and export to various formats.
+Pipeline для навчання, валідації та експорту моделей детекції на інфрачервоних (тепловізійних) зображеннях.
+Підтримує архітектури **YOLO** та **RT-DETR** через уніфікований API Ultralytics.
 
-## 📋 Table of Contents
+Класи: custom
 
-- [Features](#features)
-- [Project Structure](#project-structure)
-- [Installation](#installation)
-- [Usage](#usage)
-  - [1. Convert COCO to YOLO Format](#1-convert-coco-to-yolo-format)
-  - [2. Prepare Dataset](#2-prepare-dataset)
-  - [3. Train Model](#3-train-model)
-  - [4. Validate Model](#4-validate-model)
-  - [5. Export Model](#5-export-model)
-- [Configuration](#configuration)
-- [Dataset Structure](#dataset-structure)
-- [Training Parameters](#training-parameters)
-- [Thermal Image Considerations](#thermal-image-considerations)
-- [Troubleshooting](#troubleshooting)
-- [License](#license)
+## Підтримувані архітектури
 
-## ✨ Features
+| Архітектура | Тип | NMS | Перемикач |
+|-------------|-----|-----|-----------|
+| **YOLO** (v8, v11, тощо) | Anchor-free CNN | Так (post-process) | `MODEL_TYPE = "yolo"` |
+| **RT-DETR** (L, X) | Transformer (end-to-end) | Ні (NMS-free) | `MODEL_TYPE = "rtdetr"` |
 
-- **COCO to YOLO Conversion**: Convert COCO format annotations to YOLO format with support for:
-  - Bounding boxes
-  - Segmentation masks (optional)
-  - Keypoints (optional)
-  - Class mapping (91 to 80 classes)
+Переключення між архітектурами — зміна однієї змінної `MODEL_TYPE` на початку кожного скрипта.
+Конфіг фільтрується автоматично: YOLO-only параметри видаляються при використанні RT-DETR і навпаки.
 
-- **Dataset Preparation**: Automated splitting into train/val/test sets with:
-  - Configurable split ratios
-  - Automatic YAML configuration generation
-  - Label verification
-
-- **Validation Tools**: Model validation and performance evaluation
-
-- **Model Export**: Export trained models to various formats:
-  - ONNX (universal, CPU/GPU)
-  - TensorRT (NVIDIA GPU optimization)
-  - TFLite (mobile/edge devices)
-  - OpenVINO (Intel CPU/GPU)
-  - CoreML (Apple devices)
-  - And more (NCNN, MNN, PaddlePaddle, etc.)
-
-## 📁 Project Structure
+## Структура проекту
 
 ```
-project/
-├── coco_to_yolo.py          # COCO format converter
-├── prepare_dataset.py       # Dataset splitting tool
-├── train.py                 # Training script (+ auto ONNX export)
-├── validate.py              # Validation script
-├── export.py                # Model export (all formats)
-├── requirements.txt         # Python dependencies
-├── dataset/                 # Source data (create this)
-│   ├── images/
-│   └── labels/
-├── dataset_split/           # Prepared dataset (auto-generated)
-│   ├── train/
-│   │   ├── images/
-│   │   └── labels/
-│   ├── val/
-│   │   ├── images/
-│   │   └── labels/
-│   ├── test/
-│   │   ├── images/
-│   │   └── labels/
-│   └── yolo.yaml
-└── yolov8x-p2_for_autolabelling/  # Training outputs (auto-generated)
+yolo_training/
+├── train.py                 # Навчання + автоматичний ONNX експорт
+├── validate.py              # Валідація на test split + звіти (JSON, Markdown)
+├── export.py                # Експорт моделі (ONNX, TensorRT, OpenVINO, тощо)
+├── coco_to_yolo.py          # Конвертер COCO -> YOLO формат
+├── prepare_dataset.py       # Розбивка датасету на train/val/test
+├── requirements.txt         # Залежності
+├── README.md
+├── dataset_split/           # Підготовлений датасет (auto-generated)
+│   ├── train/images/, train/labels/
+│   ├── val/images/, val/labels/
+│   ├── test/images/, test/labels/
+│   └── data.yaml
+└── <PROJECT_NAME>/          # Результати навчання (auto-generated)
     └── baseline/
         ├── weights/
         │   ├── best.pt
-        │   ├── best.onnx      # Auto-exported after training
+        │   ├── best.onnx
         │   └── last.pt
+        ├── args.yaml        # Повний конфіг навчання (від ultralytics)
+        ├── results.csv      # Метрики по епохах
         └── results.png
 ```
 
-## Installation
+## Встановлення
 
-### Setup
-
-1. Clone or download this project:
 ```bash
+# 1. Клонувати
 git clone <url>
 cd yolo_training
-```
 
-2. Create a virtual environment (recommended):
-```bash
-python -m venv venv
+# 2. Віртуальне середовище
+python -m venv yolo_training_env
+yolo_training_env\Scripts\activate       # Windows
+# source yolo_training_env/bin/activate  # Linux/Mac
 
-# On Windows
-venv\Scripts\activate
-
-# On Linux/Mac
-source venv/bin/activate
-```
-
-3. Install dependencies:
-```bash
+# 3. Залежності
 pip install -r requirements.txt
+
+# 4. Перевірка
+python -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}')"
 ```
 
-4. Verify installation:
+## Використання
+
+### Перемикач архітектури
+
+На початку кожного скрипта (`train.py`, `validate.py`, `export.py`) є:
+
+```python
+MODEL_TYPE = "yolo"        # <-- ПЕРЕМИКАЧ: "yolo" або "rtdetr"
+```
+
+При невірному значенні (наприклад `"rsdetr"`, `"tolo"`) — скрипт кидає `ValueError` з переліком допустимих значень.
+
+Параметри, помічені `[YOLO-only]` в конфігу, автоматично видаляються при `MODEL_TYPE = "rtdetr"`. В консолі буде лог:
+```
+[Config] MODEL_TYPE='rtdetr' -> видалено несумісні ключі: ['close_mosaic', 'copy_paste', 'dfl', ...]
+```
+
+### 1. Підготовка датасету
+
 ```bash
-python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}')"
-```
-
-## 📖 Usage
-
-### 1. Convert COCO to YOLO Format
-
-If your annotations are in COCO format, convert them first:
-
-```python
+# Конвертація COCO -> YOLO (якщо потрібно)
 python coco_to_yolo.py
-```
 
-**Configuration** (edit in `coco_to_yolo.py`):
-```python
-CONFIG = {
-    "labels_dir": "path/to/coco/annotations",  # Folder with JSON files
-    "json_file": None,                         # Specific JSON file (or None for all)
-    "save_dir": "path/to/output/labels",       # Output folder
-    "use_segments": False,                     # Include segmentation masks
-    "use_keypoints": False,                    # Include keypoints
-    "cls91to80": False,                        # Map 91 COCO classes to 80
-    "class_offset": 0,                         # Class ID offset (1 for COCO)
-}
-```
-
-### 2. Prepare Dataset
-
-Split your dataset into train/val/test sets:
-
-```python
+# Розбивка на train/val/test
 python prepare_dataset.py
 ```
 
-**Configuration** (edit in `prepare_dataset.py`):
-```python
-# Split ratios
-TRAIN_RATIO = ...
-VAL_RATIO = ...
-TEST_RATIO = ...
+### 2. Навчання
 
-# Source paths
-SOURCE_IMAGES = Path("dataset/images")
-SOURCE_LABELS = Path("dataset/labels")
-
-# Classes (adjust for your dataset)
-CLASSES = {...}
-```
-
-The script will:
-- Split images randomly with a fixed seed
-- Copy images and labels to respective folders
-- Generate `yolo.yaml` configuration
-- Report statistics
-
-### 3. Train Model
-
-```python
+```bash
 python train.py
 ```
 
-**Key Configuration** (edit in `train.py`):
+Конфігурація — на початку `train.py`:
 
 ```python
-TRAINING_CONFIG = {
-    "epochs": 100,
-    "batch": 4,
-    "imgsz": 960,
-    # ... інші параметри
-}
+MODEL_TYPE = "yolo"                    # або "rtdetr"
+PRETRAINED_MODEL = "yolo11x.pt"        # або "rtdetr-x.pt"
 
-# Автоматичний експорт в ONNX після навчання
+TRAINING_CONFIG = {
+    "epochs": 50,
+    "batch": 4,
+    "imgsz": 1024,
+    "optimizer": "AdamW",
+    "lr0": 0.001,          # RT-DETR рекомендовано: 0.0001
+    "warmup_epochs": 3.0,  # RT-DETR рекомендовано: 5.0
+    "cos_lr": False,       # RT-DETR рекомендовано: True
+    # ...
+}
+```
+
+Після навчання автоматично експортує модель в ONNX.
+
+**Результати:**
+- `<PROJECT_NAME>/baseline/weights/best.pt` — найкраща модель
+- `<PROJECT_NAME>/baseline/weights/best.onnx` — ONNX експорт
+- `<PROJECT_NAME>/baseline/args.yaml` — повний конфіг (логування ultralytics)
+- `<PROJECT_NAME>/baseline/results.csv` — метрики по епохах
+
+### 3. Валідація
+
+```bash
+python validate.py
+```
+
+Конфігурація — на початку `validate.py`:
+
+```python
+MODEL_TYPE = "yolo"                    # або "rtdetr"
+
+VALIDATION_CONFIG = {
+    "conf": 0.5,
+    "iou": 0.5,
+    "imgsz": 960,
+    "split": "test",
+    # ...
+}
+```
+
+**Результати:**
+- `validation_results.json` — метрики в JSON
+- `validation_report.md` — Markdown звіт з таблицями
+- Консольний вивід з mAP, Precision, Recall, F1, FPS
+
+### 4. Експорт
+
+```bash
+python export.py
+```
+
+Конфігурація — на початку `export.py`:
+
+```python
+MODEL_TYPE = "yolo"                    # або "rtdetr"
+
 EXPORT_CONFIG = {
     "format": "onnx",
-    "imgsz": 960,
+    "imgsz": (540, 960),
+    "half": False,
     "dynamic": True,
     "simplify": True,
     # ...
 }
 ```
 
-Training outputs:
-- Best model: `PROJECT_NAME/baseline/weights/best.pt`
-- ONNX model: `PROJECT_NAME/baseline/weights/best.onnx` (auto-exported)
-- Last model: `PROJECT_NAME/baseline/weights/last.pt`
-- Training plots: `PROJECT_NAME/baseline/results.png`
+**Підтримувані формати:**
 
-### 4. Validate Model
-
-Evaluate model performance:
-
-```python
-python validate.py
-```
-
-**Configuration** (edit in `validate.py`):
-
-```python
-VALIDATION_CONFIG = {
-    "conf": 0.5,
-    "iou": 0.5,
-    "imgsz": 576,
-    "split": "test",
-    # ...
-}
-```
-
-### 5. Export Model
-
-Export trained model to various formats for deployment:
-
-```python
-python export.py
-```
-
-**Configuration** (edit in `export.py`):
-
-```python
-EXPORT_CONFIG = {
-    "format": "onnx",       # onnx, engine, tflite, openvino, coreml, etc.
-    "imgsz": 960,
-    "half": False,          # FP16 quantization
-    "int8": False,          # INT8 quantization (needs calibration data)
-    "dynamic": True,        # Dynamic input size
-    "simplify": True,       # Simplify ONNX graph
-    # ...
-}
-```
-
-**Supported export formats:**
-
-| Format | Argument | Use Case |
-|--------|----------|----------|
-| ONNX | `onnx` | Universal, CPU/GPU inference |
-| TensorRT | `engine` | NVIDIA GPU (up to 5x speedup) |
-| OpenVINO | `openvino` | Intel CPU/GPU (up to 3x speedup) |
-| TFLite | `tflite` | Mobile/Edge devices |
-| CoreML | `coreml` | Apple devices (macOS/iOS) |
-| NCNN | `ncnn` | Mobile/Embedded (ARM) |
+| Формат | Аргумент | Призначення |
+|--------|----------|-------------|
+| ONNX | `onnx` | Універсальний, CPU/GPU |
+| TensorRT | `engine` | NVIDIA GPU (до 5x прискорення) |
+| OpenVINO | `openvino` | Intel CPU/GPU |
+| TFLite | `tflite` | Мобільні/Edge пристрої |
+| CoreML | `coreml` | Apple (macOS/iOS) |
+| NCNN | `ncnn` | ARM (мобільні/embedded) |
 | TorchScript | `torchscript` | PyTorch deployment |
 
-**Programmatic usage:**
+## YOLO vs RT-DETR — різниця в конфігурації
 
-```python
-from export import export_model
+### Параметри, що автоматично фільтруються
 
-# Default export (uses EXPORT_CONFIG)
-export_model()
+При `MODEL_TYPE = "rtdetr"` з конфігу навчання видаляються:
 
-# Custom export
-export_model(format="engine", half=True)  # TensorRT FP16
-export_model(format="tflite", int8=True, data="yolo.yaml")  # TFLite INT8
-```
+| Параметр | Причина |
+|----------|---------|
+| `dfl` | Distribution Focal Loss — тільки YOLO |
+| `nbs` | Nominal batch size — YOLO-specific |
+| `close_mosaic` | Mosaic pipeline — тільки YOLO |
+| `mosaic` | Mosaic аугментація — YOLO-specific |
+| `copy_paste`, `copy_paste_mode` | Copy-paste аугментація — YOLO |
+| `multi_scale` | Multi-scale training — YOLO |
+| `overlap_mask`, `mask_ratio` | Segmentation mask — YOLO |
+| `pose`, `kobj` | Pose/Keypoint loss — YOLO |
 
+При експорті: `nms` видаляється для RT-DETR (NMS-free архітектура).
+
+### Рекомендовані значення для RT-DETR
+
+Трансформерна архітектура потребує інших гіперпараметрів. Рекомендації вказані коментарями біля відповідних параметрів в `train.py`:
+
+| Параметр | YOLO | RT-DETR |
+|----------|------|---------|
+| `lr0` | 0.001 | 0.0001 |
+| `warmup_epochs` | 3.0 | 5.0 |
+| `cos_lr` | False | True |
+
+### Loss функції
+
+- **YOLO**: `box` + `cls` + `dfl` (Distribution Focal Loss)
+- **RT-DETR**: Hungarian matching + GIOU + L1 + Cross-Entropy (параметри `box` та `cls` спільні)
+
+## Особливості IR (тепловізійних) зображень
+
+Конфігурація аугментацій налаштована під специфіку тепловізійних зображень:
+
+- **HSV**: `hsv_h=0`, `hsv_s=0` (grayscale, немає кольору), `hsv_v=0.3` (варіація яскравості)
+- **Flip**: `flipud=0` (камера зверху, не перевертати), `fliplr=0.5`
+- **Геометрія**: мінімальні повороти (`degrees=5`), без перспективних спотворень
+- **BGR**: вимкнено (grayscale)

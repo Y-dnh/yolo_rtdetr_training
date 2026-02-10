@@ -1,15 +1,37 @@
 """
-Модуль для експорту YOLO моделей у різні формати.
+Модуль для експорту YOLO / RT-DETR моделей у різні формати.
 Підтримує: ONNX, TensorRT, TFLite, OpenVINO, CoreML та інші.
 Усі параметри конфігурації знаходяться на початку файлу.
 Документація: https://docs.ultralytics.com/modes/export/#arguments
+
+Перемикач MODEL_TYPE дозволяє обрати архітектуру:
+  - "yolo"   -> ultralytics.YOLO
+  - "rtdetr"  -> ultralytics.RTDETR
 """
 
 import os
 from pathlib import Path
 from datetime import datetime
-from ultralytics import YOLO
+from ultralytics import YOLO, RTDETR
 
+
+# =============================================================================
+# ВИБІР АРХІТЕКТУРИ: "yolo" або "rtdetr"
+# =============================================================================
+VALID_MODEL_TYPES = {"yolo", "rtdetr"}
+MODEL_TYPE = "yolo"        # <-- ПЕРЕМИКАЧ: "yolo" або "rtdetr"
+
+# =============================================================================
+# ПАРАМЕТРИ, СПЕЦИФІЧНІ ДЛЯ КОЖНОЇ АРХІТЕКТУРИ (експорт)
+# =============================================================================
+
+# Ключі експорту, які є ТІЛЬКИ у YOLO
+YOLO_ONLY_EXPORT_KEYS = {
+    "nms",              # RT-DETR — NMS-free архітектура
+}
+
+# Ключі експорту, які є ТІЛЬКИ у RT-DETR
+RTDETR_ONLY_EXPORT_KEYS: set[str] = set()
 
 # =============================================================================
 # БАЗОВА КОНФІГУРАЦІЯ
@@ -32,17 +54,15 @@ MODEL_PATH = os.path.join(PROJECT_DIR, "baseline", "weights", "best.pt")
 EXPORT_CONFIG = {
     "format": "onnx",
     
-
-    "imgsz": 960,
+    "imgsz": (540, 960),
     "half": False,
     "int8": False,
     "optimize": False,
-    "half": False,
     "dynamic": True,
     "simplify": True,
     "opset": None,
     "workspace": None,
-    "nms": False,
+    "nms": False,               # [YOLO-only] Вбудувати NMS (RT-DETR: NMS-free архітектура)
     "batch": 1,
     "device": None,
     "data": None,
@@ -55,6 +75,76 @@ EXPORT_CONFIG = {
 # =============================================================================
 # ФУНКЦІЇ
 # =============================================================================
+def validate_model_type() -> None:
+    """Перевірка що MODEL_TYPE має допустиме значення."""
+    if MODEL_TYPE not in VALID_MODEL_TYPES:
+        raise ValueError(
+            f"Невідомий MODEL_TYPE: '{MODEL_TYPE}'. "
+            f"Допустимі значення: {sorted(VALID_MODEL_TYPES)}"
+        )
+
+
+def load_model(model_path: str):
+    """
+    Завантаження моделі відповідно до MODEL_TYPE.
+    Автоматично визначає тип, якщо в шляху є 'rtdetr'.
+    
+    Args:
+        model_path: Шлях до моделі
+    
+    Returns:
+        Завантажена модель (YOLO або RTDETR)
+    
+    Raises:
+        ValueError: Якщо MODEL_TYPE невідомий
+    """
+    validate_model_type()
+
+    if MODEL_TYPE == "rtdetr" or "rtdetr" in model_path.lower():
+        print(f"[Model] Завантаження RT-DETR: {model_path}")
+        return RTDETR(model_path)
+    else:
+        print(f"[Model] Завантаження YOLO: {model_path}")
+        return YOLO(model_path)
+
+
+def filter_config(config: dict, excluded_keys: set) -> dict:
+    """
+    Фільтрує конфігурацію: видаляє ключі, несумісні з поточною архітектурою.
+    
+    Args:
+        config: Вхідний словник конфігурації
+        excluded_keys: Множина ключів, які потрібно видалити
+    
+    Returns:
+        dict: Відфільтрований словник
+    """
+    removed = set(config.keys()) & excluded_keys
+    if removed:
+        print(f"[Config] MODEL_TYPE='{MODEL_TYPE}' -> видалено несумісні ключі: {sorted(removed)}")
+
+    return {k: v for k, v in config.items() if k not in excluded_keys}
+
+
+def get_export_config(**kwargs) -> dict:
+    """
+    Повертає відфільтрований export config для поточного MODEL_TYPE.
+    
+    Args:
+        **kwargs: Параметри, що перезаписують EXPORT_CONFIG
+    
+    Returns:
+        dict: Готовий конфіг для model.export()
+    """
+    config = {**EXPORT_CONFIG, **kwargs}
+
+    if MODEL_TYPE == "rtdetr":
+        return filter_config(config, YOLO_ONLY_EXPORT_KEYS)
+    elif MODEL_TYPE == "yolo":
+        return filter_config(config, RTDETR_ONLY_EXPORT_KEYS)
+    return config
+
+
 def print_header(model_path: str, config: dict) -> None:
     """Виведення заголовку експорту."""
     model_name = Path(model_path).name
@@ -98,8 +188,8 @@ def export_model(
         print(f"Помилка: Модель не знайдена: {model_path}")
         return None
     
-    # Об'єднуємо конфігурацію з переданими параметрами
-    config = {**EXPORT_CONFIG, **kwargs}
+    # Отримуємо відфільтрований конфіг для поточного MODEL_TYPE
+    config = get_export_config(**kwargs)
     
     # Фільтруємо None значення (ultralytics не любить None)
     export_params = {k: v for k, v in config.items() if v is not None}
@@ -112,7 +202,7 @@ def export_model(
     print(f"[Export] Завантаження моделі: {Path(model_path).name}")
     
     try:
-        model = YOLO(model_path)
+        model = load_model(model_path)
         print(f"[Export] Експорт у формат '{config['format']}'...")
         
         exported_path = model.export(**export_params)

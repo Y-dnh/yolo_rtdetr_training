@@ -1,6 +1,10 @@
 """
-Модуль для тестування/валідації YOLO моделі детекції на IR зображеннях.
+Модуль для тестування/валідації YOLO / RT-DETR моделі детекції на IR зображеннях.
 Усі параметри конфігурації знаходяться на початку файлу.
+
+Перемикач MODEL_TYPE дозволяє обрати архітектуру:
+  - "yolo"   -> ultralytics.YOLO
+  - "rtdetr"  -> ultralytics.RTDETR
 """
 
 import os
@@ -8,8 +12,27 @@ import json
 from pathlib import Path
 from datetime import datetime
 import torch
-from ultralytics import YOLO
+from ultralytics import YOLO, RTDETR
 
+
+# =============================================================================
+# ВИБІР АРХІТЕКТУРИ: "yolo" або "rtdetr"
+# =============================================================================
+VALID_MODEL_TYPES = {"yolo", "rtdetr"}
+MODEL_TYPE = "yolo"        # <-- ПЕРЕМИКАЧ: "yolo" або "rtdetr"
+
+# =============================================================================
+# ПАРАМЕТРИ, СПЕЦИФІЧНІ ДЛЯ КОЖНОЇ АРХІТЕКТУРИ (валідація)
+# =============================================================================
+
+# Ключі валідації, які є ТІЛЬКИ у YOLO
+YOLO_ONLY_VAL_KEYS = {
+    "agnostic_nms",     # Class-agnostic NMS — RT-DETR не використовує NMS
+    "dnn",              # OpenCV DNN backend — тільки для YOLO
+}
+
+# Ключі валідації, які є ТІЛЬКИ у RT-DETR
+RTDETR_ONLY_VAL_KEYS: set[str] = set()
 
 # =============================================================================
 # БАЗОВА КОНФІГУРАЦІЯ
@@ -18,9 +41,9 @@ PROJECT_NAME = "yolov8x-p2_for_autolabelling"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.join(BASE_DIR, PROJECT_NAME)
-DATASET_ROOT = os.path.join(BASE_DIR, "dataset")
+DATASET_ROOT = os.path.join(BASE_DIR, "dataset_split")
 YAML_PATH = os.path.join(DATASET_ROOT, "yolo.yaml")
-EXPERIMENT_NAME = "validation_test_576"
+EXPERIMENT_NAME = "validation_test_960"
 
 TRAINED_MODEL_PATH = os.path.join(PROJECT_DIR, "baseline", "weights", "best.pt")
 
@@ -43,7 +66,7 @@ VALIDATION_CONFIG = {
     # Параметри детекції
     "conf": 0.5,
     "iou": 0.5,
-    "imgsz": 576,
+    "imgsz": 960,
     "device": None,  # Автоматичне визначення
     "batch": 32,  # Зменшено для економії пам'яті
     "max_det": 300,
@@ -52,7 +75,7 @@ VALIDATION_CONFIG = {
     "rect": True,
     "half": True,
     "augment": False,
-    "agnostic_nms": False,
+    "agnostic_nms": False,   # [YOLO-only] RT-DETR не використовує NMS
     "classes": None,
     "single_cls": False,
     "dnn": False,
@@ -72,6 +95,76 @@ VALIDATION_CONFIG = {
     "project": PROJECT_DIR,
     "name": EXPERIMENT_NAME,
 }
+
+
+def validate_model_type() -> None:
+    """Перевірка що MODEL_TYPE має допустиме значення."""
+    if MODEL_TYPE not in VALID_MODEL_TYPES:
+        raise ValueError(
+            f"Невідомий MODEL_TYPE: '{MODEL_TYPE}'. "
+            f"Допустимі значення: {sorted(VALID_MODEL_TYPES)}"
+        )
+
+
+def load_model(model_path: str):
+    """
+    Завантаження моделі відповідно до MODEL_TYPE.
+    Автоматично визначає тип, якщо в шляху є 'rtdetr'.
+    
+    Args:
+        model_path: Шлях до моделі
+    
+    Returns:
+        Завантажена модель (YOLO або RTDETR)
+    
+    Raises:
+        ValueError: Якщо MODEL_TYPE невідомий
+    """
+    validate_model_type()
+
+    if MODEL_TYPE == "rtdetr" or "rtdetr" in model_path.lower():
+        print(f"[Model] Завантаження RT-DETR: {model_path}")
+        return RTDETR(model_path)
+    else:
+        print(f"[Model] Завантаження YOLO: {model_path}")
+        return YOLO(model_path)
+
+
+def filter_config(config: dict, excluded_keys: set) -> dict:
+    """
+    Фільтрує конфігурацію: видаляє ключі, несумісні з поточною архітектурою.
+    
+    Args:
+        config: Вхідний словник конфігурації
+        excluded_keys: Множина ключів, які потрібно видалити
+    
+    Returns:
+        dict: Відфільтрований словник
+    """
+    removed = set(config.keys()) & excluded_keys
+    if removed:
+        print(f"[Config] MODEL_TYPE='{MODEL_TYPE}' -> видалено несумісні ключі: {sorted(removed)}")
+
+    return {k: v for k, v in config.items() if k not in excluded_keys}
+
+
+def get_val_config(**kwargs) -> dict:
+    """
+    Повертає відфільтрований validation config для поточного MODEL_TYPE.
+    
+    Args:
+        **kwargs: Параметри, що перезаписують VALIDATION_CONFIG
+    
+    Returns:
+        dict: Готовий конфіг для model.val()
+    """
+    config = {**VALIDATION_CONFIG, **kwargs}
+
+    if MODEL_TYPE == "rtdetr":
+        return filter_config(config, YOLO_ONLY_VAL_KEYS)
+    elif MODEL_TYPE == "yolo":
+        return filter_config(config, RTDETR_ONLY_VAL_KEYS)
+    return config
 
 
 def print_header(model_path: str, config: dict, device: str) -> None:
@@ -114,8 +207,8 @@ def validate_model(
     Returns:
         object: Результати валідації
     """
-    # Об'єднуємо конфігурацію з переданими параметрами
-    config = {**VALIDATION_CONFIG, **kwargs}
+    # Отримуємо відфільтрований конфіг для поточного MODEL_TYPE
+    config = get_val_config(**kwargs)
     
     # Автоматичне визначення device якщо не вказано
     if config["device"] is None:
@@ -124,8 +217,8 @@ def validate_model(
     # Виводимо заголовок
     print_header(model_path, config, config["device"])
     
-    print(f"[Validator] Loading model from {Path(model_path).name}...")
-    model = YOLO(model_path)
+    print(f"[Validator] Loading {MODEL_TYPE.upper()} model from {Path(model_path).name}...")
+    model = load_model(model_path)
     print(f"[Validator] Model loaded successfully!")
     
     # Запуск валідації

@@ -1,7 +1,11 @@
 """
-Модуль для навчання YOLO моделі детекції на IR (інфрачервоних) зображеннях.
+Модуль для навчання YOLO / RT-DETR моделі детекції на IR (інфрачервоних) зображеннях.
 Класи: person, car, truck
 Усі параметри конфігурації знаходяться на початку файлу.
+
+Перемикач MODEL_TYPE дозволяє обрати архітектуру:
+  - "yolo"   -> ultralytics.YOLO
+  - "rtdetr"  -> ultralytics.RTDETR
 """
 
 import os
@@ -16,21 +20,63 @@ if sys.platform == 'win32':
 import random
 import numpy as np
 import torch
-from ultralytics import YOLO
+from ultralytics import YOLO, RTDETR
 import ultralytics
 
+
+# =============================================================================
+# ВИБІР АРХІТЕКТУРИ: "yolo" або "rtdetr"
+# =============================================================================
+VALID_MODEL_TYPES = {"yolo", "rtdetr"}
+MODEL_TYPE = "yolo"        # <-- ПЕРЕМИКАЧ: "yolo" або "rtdetr"
 
 # =============================================================================
 # БАЗОВА КОНФІГУРАЦІЯ
 # =============================================================================
 SEED = 42
-PROJECT_NAME = "yolov8x-p2_for_autolabelling"
-PRETRAINED_MODEL = "yolov8x-p2.yaml"
+
+# --- YOLO конфіг ---
+PROJECT_NAME = "yolo11x_for_autolabelling"
+PRETRAINED_MODEL = "D:/projects_yaroslav/yolo_training/yolo11x_for_autolabelling/baseline/weights/last.pt"
+
+# --- RT-DETR конфіг (розкоментувати при MODEL_TYPE = "rtdetr") ---
+# PROJECT_NAME = "rtdetr-x_for_autolabelling"
+# PRETRAINED_MODEL = "rtdetr-x.pt"  # rtdetr-l.pt або rtdetr-x.pt
 # Шляхи до даних
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATASET_ROOT = os.path.join(BASE_DIR, "dataset_split")
+# DATASET_ROOT = os.path.join(BASE_DIR, "dataset_split")
+DATASET_ROOT = "D:/dataset_for_training"
 PROJECT_DIR = os.path.join(BASE_DIR, PROJECT_NAME)
-YAML_PATH = os.path.join(DATASET_ROOT, "yolo.yaml")
+YAML_PATH = os.path.join(DATASET_ROOT, "data.yaml")
+
+
+# =============================================================================
+# ПАРАМЕТРИ, СПЕЦИФІЧНІ ДЛЯ КОЖНОЇ АРХІТЕКТУРИ
+# Ці множини використовуються для автоматичної фільтрації конфігу
+# =============================================================================
+
+# Ключі, які є ТІЛЬКИ у YOLO (будуть видалені при MODEL_TYPE="rtdetr")
+YOLO_ONLY_TRAIN_KEYS = {
+    "dfl",              # Distribution Focal Loss — тільки YOLO
+    "nbs",              # Nominal batch size
+    "overlap_mask",     # Segmentation mask overlap
+    "mask_ratio",       # Segmentation mask ratio
+    "pose",             # Pose estimation loss weight
+    "kobj",             # Keypoint objectness loss weight
+    "close_mosaic",     # Epoch to disable mosaic — YOLO mosaic pipeline
+    "mosaic",           # Mosaic augmentation probability
+    "copy_paste",       # Copy-paste augmentation
+    "copy_paste_mode",  # Copy-paste mode
+    "multi_scale",      # Multi-scale training
+}
+
+# Ключі, які є ТІЛЬКИ у RT-DETR (будуть видалені при MODEL_TYPE="yolo")
+RTDETR_ONLY_TRAIN_KEYS: set[str] = set()  # Поки немає унікальних — ultralytics приймає спільні
+
+# Ключі експорту, які специфічні для YOLO
+YOLO_ONLY_EXPORT_KEYS = {
+    "nms",              # RT-DETR — NMS-free архітектура, nms завжди має бути False
+}
 
 
 # ============================================================================
@@ -41,16 +87,16 @@ TRAINING_CONFIG = {
     "data": YAML_PATH,
     "project": PROJECT_DIR,
     "name": "baseline",
-    "exist_ok": False,
+    "exist_ok": True,
 
     # ==========================================================================
     # ЗАГАЛЬНІ ПАРАМЕТРИ НАВЧАННЯ ДЛЯ IR (ТЕПЛОВІЗІЙНИХ) ЗОБРАЖЕНЬ
     # ==========================================================================
-    "epochs": 100,          # Більше епох для кращої збіжності на IR даних
+    "epochs": 50,          # Більше епох для кращої збіжності на IR даних
     "time": None,
-    "patience": 10,        # Більше терпіння - IR дані можуть потребувати більше часу
-    "batch": 4,            # Менший batch для YOLO11x (велика модель)
-    "imgsz": 960,         # Стандартний розмір
+    "patience": 20,        # Більше терпіння - IR дані можуть потребувати більше часу
+    "batch": 4,            # Менший batch для великої моделі
+    "imgsz": 1024,         # Стандартний розмір
     "save": True,
     "save_period": -1,
     "cache": False,
@@ -60,11 +106,11 @@ TRAINING_CONFIG = {
     "deterministic": True,
     "single_cls": False,
     "classes": None,
-    "rect": False,          # Rectangular training - зберігає aspect ratio
-    "multi_scale": False,    # Multi-scale для кращої генералізації
-    "cos_lr": False,        # Cosine LR scheduler - плавніше навчання
-    "close_mosaic": 10,     # Вимкнути mosaic пізніше для fine-tuning
-    "resume": False,
+    "rect": False,          # Rectangular training — зберігає aspect ratio
+    "multi_scale": False,   # [YOLO-only] Multi-scale для кращої генералізації
+    "cos_lr": False,        # Cosine LR scheduler — плавніше навчання. RT-DETR рекомендовано: True
+    "close_mosaic": 10,     # [YOLO-only] Вимкнути mosaic пізніше для fine-tuning
+    "resume": True,
     "amp": False,
     "fraction": 1.0,
     "profile": False,
@@ -73,62 +119,64 @@ TRAINING_CONFIG = {
     "plots": True,
     "compile": False,
 
-# ==========================================================================
+    # ==========================================================================
     # ОПТИМІЗАТОР ТА LEARNING RATE ДЛЯ IR ЗОБРАЖЕНЬ
     # ==========================================================================
-    "pretrained": False,
+    "pretrained": True,
     "optimizer": "AdamW",
-    "lr0": 0.001,           
+    "lr0": 0.001,           # RT-DETR рекомендовано: 0.0001 (трансформер потребує нижчий LR)
     "lrf": 0.01,
     "momentum": 0.937,        # AdamW зазвичай має beta1=0.9
     "weight_decay": 0.0005,
-    "warmup_epochs": 3.0,   
-    "warmup_momentum": 0.5, 
-    "warmup_bias_lr": 0.01, 
+    "warmup_epochs": 3.0,     # RT-DETR рекомендовано: 5.0 (більше warmup для трансформера)
+    "warmup_momentum": 0.5,
+    "warmup_bias_lr": 0.01,
 
     # ==========================================================================
     # ВАГИ ФУНКЦІЙ ВТРАТ ДЛЯ IR ДЕТЕКЦІЇ
+    # YOLO: box + cls + dfl
+    # RT-DETR: Hungarian matching + GIOU + L1 + CE (dfl/nbs/overlap_mask/... ігноруються)
     # ==========================================================================
-    "box": 7.5,             # Вага box loss
-    "cls": 1.0,             # Збільшено - важливо розрізняти person/car/truck на IR
-    "dfl": 1.5,             # Distribution focal loss
-    "pose": 12.0,
-    "kobj": 1.0,
-    "nbs": 64,
-    "overlap_mask": True,
-    "mask_ratio": 4,
+    "box": 7.5,             # Вага box loss (спільний)
+    "cls": 1.0,             # Збільшено — важливо розрізняти person/car/truck на IR (спільний)
+    "dfl": 1.5,             # [YOLO-only] Distribution Focal Loss
+    "pose": 12.0,           # [YOLO-only] Pose estimation loss weight
+    "kobj": 1.0,            # [YOLO-only] Keypoint objectness
+    "nbs": 64,              # [YOLO-only] Nominal batch size
+    "overlap_mask": True,   # [YOLO-only] Mask overlap
+    "mask_ratio": 4,        # [YOLO-only] Mask ratio
     "dropout": 0.0,
     "label_smoothing": 0.0,
 
     # ==========================================================================
     # АУГМЕНТАЦІЯ ДЛЯ ІНФРАЧЕРВОНИХ (ТЕПЛОВІЗІЙНИХ) ЗОБРАЖЕНЬ
     # ==========================================================================
-    # HSV аугментації вимкнені - зображення вже grayscale
-    "hsv_h": 0.0,           # Вимкнено - немає кольору
-    "hsv_s": 0.0,           # Вимкнено - немає насиченості
-    "hsv_v": 0.3,           # Невелика варіація яскравості (контраст тепловізора може змінюватись)
-    
+    # HSV аугментації вимкнені — зображення вже grayscale
+    "hsv_h": 0.0,           # Вимкнено — немає кольору
+    "hsv_s": 0.0,           # Вимкнено — немає насиченості
+    "hsv_v": 0.3,           # Невелика варіація яскравості
+
     # Геометричні трансформації
-    "degrees": 5.0,         # Мінімальний поворот - камера на мачті стабільна
+    "degrees": 5.0,         # Мінімальний поворот — камера на мачті стабільна
     "translate": 0.15,      # Зсув зображення
     "scale": 0.4,           # Масштабування (об'єкти на різних відстанях)
     "shear": 2.0,           # Невеликий зсув перспективи
-    "perspective": 0.0,     # Вимкнено - фіксована висота камери
-    
+    "perspective": 0.0,     # Вимкнено — фіксована висота камери
+
     # Відображення
-    "flipud": 0.0,          # Вимкнено - камера завжди зверху
+    "flipud": 0.0,          # Вимкнено — камера завжди зверху
     "fliplr": 0.5,          # Горизонтальне відображення
-    "bgr": 0.0,             # Вимкнено - grayscale
-    
+    "bgr": 0.0,             # Вимкнено — grayscale
+
     # Композитні аугментації
-    "mosaic": 1.0,          # Mosaic аугментація
+    "mosaic": 1.0,          # [YOLO-only] Mosaic аугментація
     "mixup": 0.0,           # Невеликий mixup для регуляризації
     "cutmix": 0.0,          # Вимкнено
-    "copy_paste": 0.0,      # Невеликий copy-paste для малих об'єктів (person)
-    "copy_paste_mode": "flip",
-    
+    "copy_paste": 0.0,      # [YOLO-only] Copy-paste для малих об'єктів (person)
+    "copy_paste_mode": "flip",  # [YOLO-only]
+
     # Інші аугментації
-    "auto_augment": "",     # Вимкнено - стандартні аугментації не для IR
+    "auto_augment": "",     # Вимкнено — стандартні аугментації не для IR
     "erasing": 0.3,         # Random erasing для регуляризації
 }
 
@@ -140,15 +188,104 @@ TRAINING_CONFIG = {
 # =============================================================================
 EXPORT_CONFIG = {
     "format": "onnx",
-    "imgsz": 960,               # Розмір входу (має відповідати imgsz з навчання)
-    "half": False,              # FP16 - зменшує розмір, прискорює інференс на GPU
-    "dynamic": True,            # Динамічний розмір входу при інференсі
+    "imgsz": 1024,              # Розмір входу (має відповідати imgsz з навчання)
+    "half": True,               # FP16 — зменшує розмір, прискорює інференс на GPU
+    "dynamic": False,           # Динамічний розмір входу при інференсі
     "simplify": True,           # Спрощення графу через onnxslim
-    "opset": None,              # ONNX opset версія (None = остання, 11-13 для сумісності)
-    "nms": False,               # Вбудувати NMS в модель
+    "opset": 12,                # ONNX opset версія (None = остання, 11-13 для сумісності)
+    "nms": False,               # [YOLO-only] Вбудувати NMS в модель (RT-DETR: завжди False)
     "batch": 1,                 # Batch size
-    "device": None,             # None = авто, 0 = GPU, "cpu" = CPU
+    "device": 0,                # None = авто, 0 = GPU, "cpu" = CPU
 }
+
+
+def validate_model_type() -> None:
+    """Перевірка що MODEL_TYPE має допустиме значення."""
+    if MODEL_TYPE not in VALID_MODEL_TYPES:
+        raise ValueError(
+            f"Невідомий MODEL_TYPE: '{MODEL_TYPE}'. "
+            f"Допустимі значення: {sorted(VALID_MODEL_TYPES)}"
+        )
+
+
+def load_model(model_path: str):
+    """
+    Завантаження моделі відповідно до MODEL_TYPE.
+    Автоматично визначає тип, якщо в шляху є 'rtdetr'.
+    
+    Args:
+        model_path: Шлях до моделі або назва архітектури
+    
+    Returns:
+        Завантажена модель (YOLO або RTDETR)
+    
+    Raises:
+        ValueError: Якщо MODEL_TYPE невідомий
+    """
+    validate_model_type()
+
+    if MODEL_TYPE == "rtdetr" or "rtdetr" in model_path.lower():
+        print(f"[Model] Завантаження RT-DETR: {model_path}")
+        return RTDETR(model_path)
+    else:
+        print(f"[Model] Завантаження YOLO: {model_path}")
+        return YOLO(model_path)
+
+
+def filter_config(config: dict, excluded_keys: set) -> dict:
+    """
+    Фільтрує конфігурацію: видаляє ключі, несумісні з поточною архітектурою.
+    
+    Args:
+        config: Вхідний словник конфігурації
+        excluded_keys: Множина ключів, які потрібно видалити
+    
+    Returns:
+        dict: Відфільтрований словник конфігурації
+    """
+    removed = set(config.keys()) & excluded_keys
+    if removed:
+        print(f"[Config] MODEL_TYPE='{MODEL_TYPE}' -> видалено несумісні ключі: {sorted(removed)}")
+
+    return {k: v for k, v in config.items() if k not in excluded_keys}
+
+
+def get_train_config(**kwargs) -> dict:
+    """
+    Повертає відфільтрований training config для поточного MODEL_TYPE.
+    
+    Args:
+        **kwargs: Параметри, що перезаписують TRAINING_CONFIG
+    
+    Returns:
+        dict: Готовий конфіг для model.train()
+    """
+    config = {**TRAINING_CONFIG, **kwargs}
+
+    if MODEL_TYPE == "rtdetr":
+        return filter_config(config, YOLO_ONLY_TRAIN_KEYS)
+    elif MODEL_TYPE == "yolo":
+        return filter_config(config, RTDETR_ONLY_TRAIN_KEYS)
+    return config
+
+
+def get_export_config(**kwargs) -> dict:
+    """
+    Повертає відфільтрований export config для поточного MODEL_TYPE.
+    
+    Args:
+        **kwargs: Параметри, що перезаписують EXPORT_CONFIG
+    
+    Returns:
+        dict: Готовий конфіг для model.export()
+    """
+    config = {**EXPORT_CONFIG, **kwargs}
+
+    if MODEL_TYPE == "rtdetr":
+        return filter_config(config, YOLO_ONLY_EXPORT_KEYS)
+    elif MODEL_TYPE == "yolo":
+        return filter_config(config, set())
+    return config
 
 
 def setup_seed(seed: int) -> None:
@@ -188,14 +325,17 @@ def train_model(
     Returns:
         tuple: (results, trained_model_path)
     """
-    # Об'єднуємо конфігурацію з переданими параметрами
-    config = {**TRAINING_CONFIG, **kwargs}
+    # Отримуємо відфільтрований конфіг для поточного MODEL_TYPE
+    config = get_train_config(**kwargs)
     
     print(f"Завантаження моделі: {model_path}")
-    model = YOLO(model_path)
+    model = load_model(model_path)
     
     print("Початок навчання...")
+    print(f"Архітектура: {MODEL_TYPE.upper()}")
+    print(f"Модель: {model_path}")
     print(f"Конфігурація: epochs={config['epochs']}, batch={config['batch']}, imgsz={config['imgsz']}")
+    print(f"Оптимізатор: {config['optimizer']}, lr0={config['lr0']}, cos_lr={config['cos_lr']}")
     
     # Навчання моделі
     results = model.train(**config)
@@ -234,8 +374,9 @@ def export_model_after_training(
     if export_config is None:
         export_config = EXPORT_CONFIG.copy()
     
-    # Фільтруємо None значення
-    config = {k: v for k, v in export_config.items() if v is not None}
+    # Фільтруємо за архітектурою та прибираємо None значення
+    config = get_export_config(**export_config)
+    config = {k: v for k, v in config.items() if v is not None}
     
     print("\n" + "=" * 60)
     print("ЕКСПОРТ МОДЕЛІ")
@@ -249,7 +390,7 @@ def export_model_after_training(
     print("=" * 60)
     
     try:
-        model = YOLO(model_path)
+        model = load_model(model_path)
         exported_path = model.export(**config)
         print(f"\nЕкспорт завершено успішно!")
         print(f"Файл збережено: {exported_path}")
