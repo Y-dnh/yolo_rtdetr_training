@@ -237,5 +237,8 @@ ehthumbs.db
 *.h5
 # Великі датасети (якщо вони зберігаються локально в папці проекту)
 dataset/
-yolov8x-p2_for_autolabelling/
+old_dataset_runs/
 dataset_split/
+yolo26s_pretrained/
+yolo26s_yaml/
+tracked_videos/

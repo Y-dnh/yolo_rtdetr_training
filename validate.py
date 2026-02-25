@@ -37,15 +37,16 @@ RTDETR_ONLY_VAL_KEYS: set[str] = set()
 # =============================================================================
 # БАЗОВА КОНФІГУРАЦІЯ
 # =============================================================================
-PROJECT_NAME = "yolov8x-p2_for_autolabelling"
+PROJECT_NAME = "yolo26s_yaml"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.join(BASE_DIR, PROJECT_NAME)
-DATASET_ROOT = os.path.join(BASE_DIR, "dataset_split")
-YAML_PATH = os.path.join(DATASET_ROOT, "yolo.yaml")
-EXPERIMENT_NAME = "validation_test_960"
+# DATASET_ROOT = os.path.join(BASE_DIR, "dataset_split")
+DATASET_ROOT = "D:/dataset_for_training"
+YAML_PATH = os.path.join(DATASET_ROOT, "data.yaml")
+EXPERIMENT_NAME = "validation_26s_yaml"
 
-TRAINED_MODEL_PATH = os.path.join(PROJECT_DIR, "baseline", "weights", "best.pt")
+TRAINED_MODEL_PATH = os.path.join(PROJECT_DIR, "baseline2", "weights", "best.pt")
 
 # Класи датасету
 CLASSES = {
@@ -61,14 +62,14 @@ CLASSES = {
 VALIDATION_CONFIG = {
     # Параметри датасету
     "data": YAML_PATH,
-    "split": "test",
+    "split": "val",
     
     # Параметри детекції
-    "conf": 0.5,
+    "conf": 0.25,
     "iou": 0.5,
-    "imgsz": 960,
+    "imgsz": 1024,
     "device": None,  # Автоматичне визначення
-    "batch": 32,  # Зменшено для економії пам'яті
+    "batch": 8,  # Зменшено для економії пам'яті
     "max_det": 300,
     
     # Параметри обробки
