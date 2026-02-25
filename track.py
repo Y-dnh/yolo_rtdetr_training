@@ -13,6 +13,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Tuple
 
 # Фікс для правильного відображення tqdm у Windows PowerShell
 if sys.platform == "win32":
@@ -32,87 +33,106 @@ from tracking import NanoTracker, TrackedObject
 
 
 # =============================================================================
-# ВИБІР АРХІТЕКТУРИ: "yolo" або "rtdetr"
+# ВИБІР АРХІТЕКТУРИ ДЕТЕКЦИЇ
 # =============================================================================
+# Визначає, яка модель використовується для детекції об'єктів на кадрі.
 VALID_MODEL_TYPES = {"yolo", "rtdetr"}
-MODEL_TYPE = "yolo"        # <-- ПЕРЕМИКАЧ: "yolo" або "rtdetr"
+MODEL_TYPE = "yolo"   # "yolo" — ultralytics.YOLO, "rtdetr" — ultralytics.RTDETR
 
-# =============================================================================
-# ПАРАМЕТРИ, СПЕЦИФІЧНІ ДЛЯ КОЖНОЇ АРХІТЕКТУРИ (інференс/predict)
-# =============================================================================
-# Ключі, які є ТІЛЬКИ у YOLO (видаляються при MODEL_TYPE="rtdetr")
-YOLO_ONLY_INFERENCE_KEYS = {
-    "agnostic_nms",  # Class-agnostic NMS — RT-DETR не використовує NMS
-}
+# Ключі конфігу інференсу, які застосовуються тільки для YOLO (при "rtdetr" їх викидають).
+YOLO_ONLY_INFERENCE_KEYS = {"agnostic_nms"}  # class-agnostic NMS; RT-DETR не використовує NMS
 RTDETR_ONLY_INFERENCE_KEYS: set[str] = set()
 
 # =============================================================================
-# БАЗОВА КОНФІГУРАЦІЯ
+# БАЗОВА КОНФІГУРАЦІЯ: ШЛЯХИ
 # =============================================================================
-PROJECT_NAME = "yolov8x-p2_for_autolabelling"
-PROJECT_DIR = os.path.join(BASE_DIR, "old_dataset_runs", PROJECT_NAME)
-MODEL_PATH = os.path.join(PROJECT_DIR, "baseline", "weights", "best.pt")
+PROJECT_NAME = "yolo26s_pretrained"
+PROJECT_DIR = os.path.join(BASE_DIR, PROJECT_NAME)
+MODEL_PATH = os.path.join(PROJECT_DIR, "baseline", "weights", "best.pt")   # ваги моделі детекції (YOLO/RT-DETR)
 
-# --- Відео ---
-# Вихід зберігається в tracked_videos/<назва_моделі>/<ім'я_відео>_tracked.mp4 та .txt з логами
+# Вхідне відео для трекінгу. Вихід: tracked_videos/<назва_моделі>/<ім'я_відео>_tracked.mp4 та .txt з логами.
 VIDEO_INPUT_PATH = "E:/DPSU/dataset_videos/uzhorod/videos_to_extract/006_02.12.2025_08.20_08.40.mkv"
 
-# --- Детекція: кожні N фреймів запускати модель; між ними — трекінг NanoTrack ---
+# Як часто запускати детекцію: модель працює тільки на кадрах 1, 1+N, 1+2N, ...; між ними лише NanoTrack.
 DETECTION_INTERVAL = 10
 
 # =============================================================================
-# ПАРАМЕТРИ ІНФЕРЕНСУ (передаються в model.predict(), як у validate.py)
+# ПАРАМЕТРИ ІНФЕРЕНСУ (model.predict)
 # =============================================================================
 INFERENCE_CONFIG = {
-    # Пороги детекції
-    "conf": 0.25,            # Confidence threshold
-    "iou": 0.5,              # NMS IoU threshold
-    "imgsz": 960,           # Розмір входу (має відповідати навчанню/експорту)
-    "max_det": 300,          # Макс. кількість детекцій на кадр
-    # Точність та пристрій
-    "half": True,           # FP16 інференс (швидше на GPU, перевірити сумісність)
-    "device": None,          # None = авто (cuda якщо є)
+    "conf": 0.25,            # мінімальний confidence детекції (нижче — відкидається)
+    "iou": 0.5,              # IoU поріг для NMS (об'єднання дублікатів боксів)
+    "imgsz": 1024,            # розмір зображення на вході моделі (краще як у навчанні)
+    "max_det": 300,          # максимум детекцій на один кадр
+    "half": True,            # FP16 інференс (швидше на GPU)
+    "device": None,          # None = авто (CUDA якщо є)
     "verbose": False,
-    # [YOLO-only] RT-DETR не використовує NMS
-    "agnostic_nms": False,
-    "classes": None,         # Фільтр класів (None = усі)
+    "agnostic_nms": False,   # [тільки YOLO] NMS без урахування класу
+    "classes": None,         # фільтр класів (None = усі класи)
 }
 
-# --- NanoTrack: ONNX-моделі (nanotrack_backbone_sim.onnx, nanotrack_head_sim.onnx) ---
+# =============================================================================
+# NANOTRACK: ШЛЯХИ ДО ONNX-МОДЕЛЕЙ
+# =============================================================================
+# --- NanoTrack: ONNX-моделі (v2 або v3) ---
+NANOTRACK_VERSION = "v2"  # "v2" або "v3"
 NANOTRACK_DIR = os.path.join(BASE_DIR, "nanotrack")
-NANOTRACK_BACKBONE = os.path.join(NANOTRACK_DIR, "v2", "nanotrack_backbone_sim.onnx")
-NANOTRACK_NECKHEAD = os.path.join(NANOTRACK_DIR, "v2", "nanotrack_head_sim.onnx")
+if NANOTRACK_VERSION == "v3":
+    NANOTRACK_BACKBONE = os.path.join(NANOTRACK_DIR, "v3", "nanotrack_backbone.onnx")
+    NANOTRACK_NECKHEAD = os.path.join(NANOTRACK_DIR, "v3", "nanotrack_head.onnx")
+else:
+    NANOTRACK_BACKBONE = os.path.join(NANOTRACK_DIR, "v2", "nanotrack_backbone_sim.onnx")
+    NANOTRACK_NECKHEAD = os.path.join(NANOTRACK_DIR, "v2", "nanotrack_head_sim.onnx")
 
-# --- Класи та кольори (BGR): person червоний, car синій, truck зелений ---
+
+# =============================================================================
+# ПАРАМЕТРИ NANOTRACKER (життя треків, злиття, ReID)
+# =============================================================================
+# Не керують тим, коли запускається детекція — лише тим, як довго живуть треки та коли їх показувати.
+
+MAX_AGE = 10        # скільки кадрів трек може жити без оновлення детекцією; після цього видаляється
+MIN_HITS = 2        # мінімум попадань детекції по треку, щоб трек почали показувати (фільтр шуму)
+IOU_THRESHOLD = 0.3 # мінімальний IoU між боксом детекції та треком, щоб вважати їх одним об'єктом
+CONFIRM_THRESHOLD = 5   # після скількох попадань трек вважається «підтвердженим»
+MIN_SEC_STABLE = 1.0    # мінімальний час (сек) у полі зору, щоб трек став «стабільним»
+
+# Оптичний потік: передбачення руху треків між кадрами (швидше/точніше за багато треків).
+USE_OPTICAL_FLOW_PREDICT = True
+OPTICAL_FLOW_THRESHOLD = 8   # від якої кількості треків увімкнути optical flow замість оновлення кожного
+ADAPTIVE_UPDATE = True       # адаптивно перемикатися на optical flow при великій кількості треків
+ADAPTIVE_THRESHOLD = 10      # поріг кількості треків для адаптивного режиму
+
+# ReID: відновлення втрачених треків (наприклад, після перекриття) за зовнішнім виглядом та позицією.
+ENABLE_REID = True
+REID_BUFFER_TIME = 20.0           # скільки секунд зберігати «втрачені» треки для пошуку збігу
+REID_IOU_THRESHOLD = 0.15         # IoU поріг для кандидатів ReID
+REID_APPEARANCE_THRESHOLD = 0.5   # поріг схожості зовнішнього вигляду (0–1)
+REID_POSITION_WEIGHT = 0.4        # вага позиції у скорі ReID
+REID_APPEARANCE_WEIGHT = 0.4      # вага зовнішнього вигляду
+REID_SIZE_WEIGHT = 0.2           # вага розміру боксу
+REID_MIN_TRACK_QUALITY = 5       # мінімальна «якість» треку (наприклад, hit_streak), щоб його зберігати в ReID-буфері
+
+
+# =============================================================================
+# ВІЗУАЛІЗАЦІЯ: КЛАСИ ТА КОЛЬОРИ (BGR)
+# =============================================================================
 CLASS_NAMES = {0: "person", 1: "car", 2: "truck"}
 CLASS_COLORS = [
-    (0, 0, 255),    # person — червоний
-    (255, 0, 0),    # car — синій
-    (0, 255, 0),    # truck — зелений
+    (0, 0, 255),    # 0 — person, червоний
+    (255, 0, 0),    # 1 — car, синій
+    (0, 255, 0),    # 2 — truck, зелений
 ]
-BBOX_THICKNESS = 1
-TEXT_SCALE = 0.5
-TEXT_THICKNESS = 1
-LABEL_PADDING = 4
-
-# --- Параметри трекінгу (NanoTracker) ---
-MAX_AGE = 10
-MIN_HITS = 2
-IOU_THRESHOLD = 0.3
-CONFIRM_THRESHOLD = 5
-MIN_SEC_STABLE = 1.0
-USE_OPTICAL_FLOW_PREDICT = True
-OPTICAL_FLOW_THRESHOLD = 8
-ADAPTIVE_UPDATE = True
-ADAPTIVE_THRESHOLD = 10
-ENABLE_REID = True
-REID_BUFFER_TIME = 20.0
-REID_IOU_THRESHOLD = 0.15
-REID_APPEARANCE_THRESHOLD = 0.5
-REID_POSITION_WEIGHT = 0.4
-REID_APPEARANCE_WEIGHT = 0.4
-REID_SIZE_WEIGHT = 0.2
-REID_MIN_TRACK_QUALITY = 5
+# Стиль візуалізації як у visualization.py: подвійна рамка, напівпрозорий фон мітки, HERSHEY_DUPLEX
+VIS_FONT = cv2.FONT_HERSHEY_DUPLEX
+VIS_TEXT_SCALE = 0.6
+VIS_TEXT_THICKNESS = 2
+VIS_TEXT_COLOR = (255, 255, 255)
+VIS_LABEL_PADDING = 8
+VIS_LINE_HEIGHT = 25
+VIS_LABEL_MARGIN = 5
+VIS_LABEL_BG_ALPHA = 0.8       # прозорість фону мітки (0–1)
+VIS_BBOX_THICKNESS = 3          # товщина основної рамки
+VIS_BBOX_INNER_THICKNESS = 1    # товщина внутрішнього «підсвіту»
 
 
 # =============================================================================
@@ -169,13 +189,45 @@ def run_detection(model, frame: np.ndarray, frame_w: int, frame_h: int) -> list:
     return detections
 
 
+def _vis_get_text_size(text: str) -> Tuple[int, int]:
+    """Розмір тексту в стилі visualization.py."""
+    return cv2.getTextSize(text, VIS_FONT, VIS_TEXT_SCALE, VIS_TEXT_THICKNESS)[0]
+
+
+def _vis_draw_text_with_background(
+    frame: np.ndarray,
+    text: str,
+    position: Tuple[int, int],
+    color: Tuple[int, int, int],
+    alpha: float = VIS_LABEL_BG_ALPHA,
+) -> None:
+    """Текст з напівпрозорим фоном та обводкою (стиль visualization.py)."""
+    x, y = position
+    tw, th = _vis_get_text_size(text)
+    bg_x1 = max(0, x - VIS_LABEL_PADDING // 2)
+    bg_y1 = max(0, y - th - VIS_LABEL_PADDING)
+    bg_x2 = min(frame.shape[1], x + tw + VIS_LABEL_PADDING // 2)
+    bg_y2 = min(frame.shape[0], y + VIS_LABEL_PADDING // 2)
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (bg_x1, bg_y1), (bg_x2, bg_y2), color, -1)
+    cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+    cv2.rectangle(frame, (bg_x1, bg_y1), (bg_x2, bg_y2), tuple(max(0, c - 50) for c in color), 1)
+    cv2.putText(frame, text, (x, y - VIS_LABEL_PADDING // 4), VIS_FONT, VIS_TEXT_SCALE, VIS_TEXT_COLOR, VIS_TEXT_THICKNESS)
+
+
+def _vis_draw_bbox(frame: np.ndarray, x1: int, y1: int, x2: int, y2: int, color: Tuple[int, int, int]) -> None:
+    """Подвійна рамка: основна + внутрішній підсвіт (стиль visualization.py)."""
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, VIS_BBOX_THICKNESS)
+    inner = tuple(min(255, c + 30) for c in color)
+    cv2.rectangle(frame, (x1 + 1, y1 + 1), (x2 - 1, y2 - 1), inner, VIS_BBOX_INNER_THICKNESS)
+
+
 def draw_tracks(frame: np.ndarray, tracked: list, class_names: dict, colors: list) -> None:
     """
-    Малювання боксів та міток у стилі як на зразку: тонка рамка кольору класу,
-    мітка над боксом — два рядки (ID та клас з confidence), суцільний фон кольору класу, білий текст.
+    Малювання боксів та міток у стилі visualization.py: подвійна рамка, напівпрозорий фон мітки,
+    білий текст (HERSHEY_DUPLEX), два рядки — клас (confidence) та ID.
     """
     h, w = frame.shape[:2]
-    white = (255, 255, 255)
     for obj in tracked:
         bbox = getattr(obj, "bbox", None)
         if bbox is None or len(bbox) != 4:
@@ -193,34 +245,27 @@ def draw_tracks(frame: np.ndarray, tracked: list, class_names: dict, colors: lis
         confidence = getattr(obj, "confidence", None)
         conf_str = f"{confidence:.2f}" if confidence is not None else "—"
 
-        line1 = f"ID: {track_id}"
-        line2 = f"{cls_name} ({conf_str})"
+        # Порядок як у visualization.py: спочатку клас (conf), потім ID
+        texts = [f"{cls_name} ({conf_str})", f"ID: {track_id}"]
 
-        (w1, h1), _ = cv2.getTextSize(line1, cv2.FONT_HERSHEY_SIMPLEX, TEXT_SCALE, TEXT_THICKNESS)
-        (w2, h2), _ = cv2.getTextSize(line2, cv2.FONT_HERSHEY_SIMPLEX, TEXT_SCALE, TEXT_THICKNESS)
-        label_w = max(w1, w2) + LABEL_PADDING * 2
-        label_h = h1 + h2 + LABEL_PADDING * 2
-        spacing = 2
-        ty = max(0, y1 - label_h)
-        tx = x1
-        cv2.rectangle(frame, (tx, ty), (tx + label_w, ty + label_h), color, -1)
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, BBOX_THICKNESS)
-        cv2.putText(
-            frame, line1,
-            (tx + LABEL_PADDING, ty + LABEL_PADDING + h1),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            TEXT_SCALE,
-            white,
-            TEXT_THICKNESS,
-        )
-        cv2.putText(
-            frame, line2,
-            (tx + LABEL_PADDING, ty + LABEL_PADDING + h1 + spacing + h2),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            TEXT_SCALE,
-            white,
-            TEXT_THICKNESS,
-        )
+        _vis_draw_bbox(frame, x1, y1, x2, y2, color)
+
+        total_height = sum(_vis_get_text_size(t)[1] + VIS_LABEL_PADDING for t in texts)
+        start_y = y1 - VIS_LABEL_MARGIN
+        if start_y - total_height < 0:
+            current_y = y1 + VIS_LINE_HEIGHT
+        else:
+            current_y = start_y
+
+        for text in texts:
+            tw, th = _vis_get_text_size(text)
+            text_x = max(VIS_LABEL_PADDING, min(x1, w - tw - VIS_LABEL_PADDING))
+            text_y = max(th + VIS_LABEL_PADDING, min(current_y, h - VIS_LABEL_PADDING))
+            _vis_draw_text_with_background(frame, text, (text_x, text_y), color)
+            if start_y - total_height < 0:
+                current_y += VIS_LINE_HEIGHT
+            else:
+                current_y -= th + VIS_LABEL_PADDING
 
 
 def run_tracking(
@@ -434,9 +479,9 @@ def run_tracking(
         f"  CLASS_NAMES: {CLASS_NAMES}",
         "",
         "--- ВІЗУАЛІЗАЦІЯ ---",
-        f"  BBOX_THICKNESS: {BBOX_THICKNESS}",
-        f"  TEXT_SCALE: {TEXT_SCALE}",
-        f"  TEXT_THICKNESS: {TEXT_THICKNESS}",
+        f"  VIS_BBOX_THICKNESS: {VIS_BBOX_THICKNESS}",
+        f"  VIS_TEXT_SCALE: {VIS_TEXT_SCALE}",
+        f"  VIS_TEXT_THICKNESS: {VIS_TEXT_THICKNESS}",
         "=" * 60,
     ])
     try:
