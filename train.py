@@ -38,7 +38,7 @@ SEED = 42
 
 # --- YOLO конфіг ---
 PROJECT_NAME = "yolo11x_for_autolabelling"
-PRETRAINED_MODEL = "D:/projects_yaroslav/yolo_training/yolo11x_for_autolabelling/baseline/weights/last.pt"
+PRETRAINED_MODEL = "D:/work/yolo_training/yolo26s/baseline/weights/best.engine"
 
 # --- Transfer Learning для YAML моделей (P2/P6 та інші кастомні архітектури) ---
 # Якщо True і model_path є .yaml файл — автоматично завантажить базові ваги (.pt)

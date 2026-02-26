@@ -46,15 +46,15 @@ RTDETR_ONLY_INFERENCE_KEYS: set[str] = set()
 # =============================================================================
 # БАЗОВА КОНФІГУРАЦІЯ: ШЛЯХИ
 # =============================================================================
-PROJECT_NAME = "yolo26s_pretrained"
+PROJECT_NAME = "yolo26s"
 PROJECT_DIR = os.path.join(BASE_DIR, PROJECT_NAME)
-MODEL_PATH = os.path.join(PROJECT_DIR, "baseline", "weights", "best.pt")   # ваги моделі детекції (YOLO/RT-DETR)
+MODEL_PATH = os.path.join(PROJECT_DIR, "baseline", "weights", "best.pt")   # TensorRT FP16 модель
 
 # Вхідне відео для трекінгу. Вихід: tracked_videos/<назва_моделі>/<ім'я_відео>_tracked.mp4 та .txt з логами.
-VIDEO_INPUT_PATH = "E:/DPSU/dataset_videos/uzhorod/videos_to_extract/006_02.12.2025_08.20_08.40.mkv"
+VIDEO_INPUT_PATH = "D:/work/test.mkv"
 
 # Як часто запускати детекцію: модель працює тільки на кадрах 1, 1+N, 1+2N, ...; між ними лише NanoTrack.
-DETECTION_INTERVAL = 10
+DETECTION_INTERVAL = 10   # BENCHMARK: детекція кожен кадр
 
 # =============================================================================
 # ПАРАМЕТРИ ІНФЕРЕНСУ (model.predict)
@@ -65,7 +65,7 @@ INFERENCE_CONFIG = {
     "imgsz": 1024,            # розмір зображення на вході моделі (краще як у навчанні)
     "max_det": 300,          # максимум детекцій на один кадр
     "half": True,            # FP16 інференс (швидше на GPU)
-    "device": None,          # None = авто (CUDA якщо є)
+    "device": 0,             # 0 = CUDA GPU (було None — падало на CPU)
     "verbose": False,
     "agnostic_nms": False,   # [тільки YOLO] NMS без урахування класу
     "classes": None,         # фільтр класів (None = усі класи)
@@ -296,6 +296,7 @@ def run_tracking(
     output_path = os.path.join(output_dir, f"{video_stem}_tracked.mp4")
     log_path = os.path.join(output_dir, f"{video_stem}_tracked.txt")
 
+    # use_nano = False  # BENCHMARK: вимкнено NanoTrack
     use_nano = os.path.isfile(NANOTRACK_BACKBONE) and os.path.isfile(NANOTRACK_NECKHEAD)
     if not use_nano:
         print(
@@ -306,6 +307,24 @@ def run_tracking(
     print(f"Завантаження моделі: {Path(model_path).name}")
     model = load_model(model_path)
     class_names = getattr(model, "names", None) or CLASS_NAMES
+
+    # Warmup: переносить модель на цільовий девайс і прогріває
+    cfg_warmup = get_inference_config()
+    cfg_warmup = {k: v for k, v in cfg_warmup.items() if v is not None}
+    dummy = np.zeros((64, 64, 3), dtype=np.uint8)
+    model.predict(dummy, **{**cfg_warmup, "verbose": False, "imgsz": 64})
+
+    # Визначення девайсу моделі (після warmup — вже на цільовому девайсі)
+    try:
+        device = next(model.model.parameters()).device
+        device_name = f"{device}"
+        if device.type == "cuda":
+            import torch
+            device_name = f"CUDA:{device.index} ({torch.cuda.get_device_name(device.index)})"
+    except Exception:
+        # TensorRT .engine — визначаємо з конфігу
+        dev_cfg = INFERENCE_CONFIG.get("device")
+        device_name = f"CUDA:{dev_cfg} (TensorRT)" if dev_cfg is not None else "TensorRT (GPU)"
 
     cap = cv2.VideoCapture(video_input_path)
     if not cap.isOpened():
@@ -325,6 +344,7 @@ def run_tracking(
     print(f"Вихід: {output_path}")
     print(f"Модель: {Path(model_path).name}")
     print(f"Архітектура: {MODEL_TYPE.upper()}")
+    print(f"Девайс: {device_name}")
     cfg = get_inference_config()
     print(f"Кадрів: {total_frames}, {fps:.1f} FPS, {width}x{height}")
     print(f"Детекція кожні: {detection_interval} фреймів")

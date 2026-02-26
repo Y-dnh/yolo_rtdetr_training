@@ -36,7 +36,7 @@ RTDETR_ONLY_EXPORT_KEYS: set[str] = set()
 # =============================================================================
 # БАЗОВА КОНФІГУРАЦІЯ
 # =============================================================================
-PROJECT_NAME = "yolo11x_for_autolabelling"
+PROJECT_NAME = "yolo26s"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.join(BASE_DIR, PROJECT_NAME)
@@ -52,10 +52,10 @@ MODEL_PATH = os.path.join(PROJECT_DIR, "baseline", "weights", "best.pt")
 # Документація: https://docs.ultralytics.com/modes/export/#arguments
 # =============================================================================
 EXPORT_CONFIG = {
-    "format": "onnx",
+    "format": "engine",
     
     "imgsz": (1024, 1024),
-    "half": False,
+    "half": True,
     "int8": False,
     "optimize": False,
     "dynamic": False,
