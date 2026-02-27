@@ -11,6 +11,7 @@
 import os
 import sys
 import time
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Tuple
@@ -46,12 +47,17 @@ RTDETR_ONLY_INFERENCE_KEYS: set[str] = set()
 # =============================================================================
 # БАЗОВА КОНФІГУРАЦІЯ: ШЛЯХИ
 # =============================================================================
-PROJECT_NAME = "yolo26s_pretrained"
+PROJECT_NAME = "yolo26s_p2"
 PROJECT_DIR = os.path.join(BASE_DIR, PROJECT_NAME)
 MODEL_PATH = os.path.join(PROJECT_DIR, "baseline", "weights", "best.pt")   # ваги моделі детекції (YOLO/RT-DETR)
 
-# Вхідне відео для трекінгу. Вихід: tracked_videos/<назва_моделі>/<ім'я_відео>_tracked.mp4 та .txt з логами.
-VIDEO_INPUT_PATH = "E:/DPSU/dataset_videos/uzhorod/videos_to_extract/006_02.12.2025_08.20_08.40.mkv"
+# Вхідне відео або папка з відео для трекінгу.
+# Якщо вказана папка — опрацьовуються всі відеофайли у ній (рекурсивно не шукаємо).
+# Вихід: tracked_videos/<назва_моделі>/<ім'я_відео>_tracked.mp4 та .txt з логами.
+VIDEO_INPUT_PATH = "D:/videos_for_test"
+
+# Розширення файлів, що вважаються відео (при вказівці папки).
+VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".wmv", ".flv"}
 
 # Як часто запускати детекцію: модель працює тільки на кадрах 1, 1+N, 1+2N, ...; між ними лише NanoTrack.
 DETECTION_INTERVAL = 10
@@ -143,6 +149,21 @@ def validate_model_type() -> None:
         raise ValueError(
             f"Невідомий MODEL_TYPE: '{MODEL_TYPE}'. Допустимі: {sorted(VALID_MODEL_TYPES)}"
         )
+
+
+def collect_videos_from_folder(folder_path: str) -> list[str]:
+    """
+    Повертає список шляхів до відеофайлів у вказаній папці (тільки один рівень, без підпапок).
+    Відфільтровано по VIDEO_EXTENSIONS, відсортовано за іменем.
+    """
+    folder = Path(folder_path)
+    if not folder.is_dir():
+        return []
+    videos = []
+    for p in folder.iterdir():
+        if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS:
+            videos.append(str(p.resolve()))
+    return sorted(videos)
 
 
 def load_model(model_path: str):
@@ -369,6 +390,8 @@ def run_tracking(
 
     frame_counter = 0
     last_tracked = []
+    detection_counts = defaultdict(int)   # cls_id -> кількість детекцій
+    track_durations = {}                  # (track_id, cls_id) -> тривалість (с)
     start_time = time.perf_counter()
     pbar = tqdm(total=total_frames if total_frames else None, unit="frame", desc="Track")
     try:
@@ -382,6 +405,10 @@ def run_tracking(
 
             if frame_counter % detection_interval == 1 or frame_counter == 1:
                 detections = run_detection(model, frame, frame_w, frame_h)
+                for d in detections:
+                    cid = d.get("cls_id")
+                    if cid is not None:
+                        detection_counts[cid] += 1
                 if tracker is not None:
                     try:
                         last_tracked = tracker.update(detections, frame)
@@ -410,6 +437,17 @@ def run_tracking(
                         pass
                 # Якщо трекера немає, last_tracked залишається з попереднього кадру (або порожній)
 
+            for obj in last_tracked:
+                cid = getattr(obj, "cls_id", None)
+                if cid is None:
+                    cid = 0
+                tid = getattr(obj, "track_id", "")
+                if tid:
+                    first = getattr(obj, "first_seen", None)
+                    last = getattr(obj, "last_seen", None)
+                    if first is not None and last is not None:
+                        track_durations[(tid, cid)] = last - first
+
             draw_tracks(frame, last_tracked, class_names, CLASS_COLORS)
             writer.write(frame)
     except Exception as e:
@@ -423,6 +461,21 @@ def run_tracking(
 
     elapsed_sec = time.perf_counter() - start_time
     fps_processed = frame_counter / elapsed_sec if elapsed_sec > 0 else 0.0
+
+    # Статистика по класах: детекції, треки, середня тривалість треку
+    all_cls_ids = sorted(set(detection_counts.keys()) | {cid for (_, cid) in track_durations})
+    tracks_per_class = defaultdict(int)
+    duration_sum_per_class = defaultdict(float)
+    for (tid, cid), dur in track_durations.items():
+        tracks_per_class[cid] += 1
+        duration_sum_per_class[cid] += dur
+    avg_duration_per_class = {}
+    for cid in all_cls_ids:
+        n = tracks_per_class.get(cid, 0)
+        if n > 0:
+            avg_duration_per_class[cid] = duration_sum_per_class[cid] / n
+        else:
+            avg_duration_per_class[cid] = None
 
     cfg = get_inference_config()
     log_lines = [
@@ -439,12 +492,23 @@ def run_tracking(
         f"Час опрацювання (с): {elapsed_sec:.2f}",
         f"FPS при обробці: {fps_processed:.2f}",
         "",
+        "--- СТАТИСТИКА ПО КЛАСАХ ---",
+    ]
+    for cid in all_cls_ids:
+        name = class_names.get(cid, f"cls_{cid}")
+        det_count = detection_counts.get(cid, 0)
+        tr_count = tracks_per_class.get(cid, 0)
+        avg_dur = avg_duration_per_class.get(cid)
+        avg_dur_str = f"{avg_dur:.2f} с" if avg_dur is not None else "—"
+        log_lines.append(f"  {name} (id={cid}): детекцій={det_count}, треків={tr_count}, середня тривалість треку={avg_dur_str}")
+    log_lines.extend([
+        "",
         "--- МОДЕЛЬ ДЕТЕКЦІЇ ---",
         f"Модель: {model_path}",
         f"Архітектура: {MODEL_TYPE}",
         "",
         "--- КОНФІГ ІНФЕРЕНСУ (model.predict) ---",
-    ]
+    ])
     for k, v in sorted(cfg.items()):
         log_lines.append(f"  {k}: {v}")
     log_lines.extend([
@@ -497,12 +561,29 @@ def run_tracking(
 
 
 def main():
-    """Головна функція для запуску обробки відео."""
-    video_path = VIDEO_INPUT_PATH.strip()
-    if not video_path:
+    """Головна функція для запуску обробки відео або всіх відео у папці."""
+    input_path = VIDEO_INPUT_PATH.strip()
+    if not input_path:
         print("Задайте VIDEO_INPUT_PATH у конфігу на початку файлу.")
         return None
-    return run_tracking(video_path, MODEL_PATH, DETECTION_INTERVAL)
+
+    path = Path(input_path)
+    if path.is_dir():
+        video_paths = collect_videos_from_folder(input_path)
+        if not video_paths:
+            print(f"У папці не знайдено відео (розширення: {', '.join(sorted(VIDEO_EXTENSIONS))}): {input_path}")
+            return None
+        print(f"Знайдено відео у папці: {len(video_paths)}")
+        results = []
+        for i, video_path in enumerate(video_paths, 1):
+            print(f"\n[{i}/{len(video_paths)}] Обробка: {Path(video_path).name}")
+            out = run_tracking(video_path, MODEL_PATH, DETECTION_INTERVAL)
+            if out:
+                results.append(out)
+        print(f"\nОпрацьовано: {len(results)}/{len(video_paths)} відео.")
+        return results
+    else:
+        return run_tracking(input_path, MODEL_PATH, DETECTION_INTERVAL)
 
 
 if __name__ == "__main__":

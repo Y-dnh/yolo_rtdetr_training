@@ -37,8 +37,8 @@ MODEL_TYPE = "yolo"        # <-- ПЕРЕМИКАЧ: "yolo" або "rtdetr"
 SEED = 42
 
 # --- YOLO конфіг ---
-PROJECT_NAME = "yolo11x_for_autolabelling"
-PRETRAINED_MODEL = "D:/projects_yaroslav/yolo_training/yolo11x_for_autolabelling/baseline/weights/last.pt"
+PROJECT_NAME = "yolo26s_p2"
+PRETRAINED_MODEL = "yolo26s-p2.yaml"
 
 # --- Transfer Learning для YAML моделей (P2/P6 та інші кастомні архітектури) ---
 # Якщо True і model_path є .yaml файл — автоматично завантажить базові ваги (.pt)
@@ -104,7 +104,7 @@ TRAINING_CONFIG = {
     "epochs": 100,          # Більше епох для кращої збіжності на IR даних
     "time": None,
     "patience": 20,        # Більше терпіння - IR дані можуть потребувати більше часу
-    "batch": 4,            # Менший batch для великої моделі
+    "batch": 8,            # Менший batch для великої моделі
     "imgsz": 1024,         # Стандартний розмір
     "save": True,
     "save_period": -1,
@@ -163,12 +163,12 @@ TRAINING_CONFIG = {
     # HSV аугментації вимкнені — зображення вже grayscale
     "hsv_h": 0.0,           # Вимкнено — немає кольору
     "hsv_s": 0.0,           # Вимкнено — немає насиченості
-    "hsv_v": 0.3,           # Невелика варіація яскравості
+    "hsv_v": 0.4,           # Невелика варіація яскравості
 
     # Геометричні трансформації
     "degrees": 5.0,         # Мінімальний поворот — камера на мачті стабільна
     "translate": 0.15,      # Зсув зображення
-    "scale": 0.0,           # Масштабування (об'єкти на різних відстанях)
+    "scale": 0.1,           # Масштабування (об'єкти на різних відстанях)
     "shear": 2.0,           # Невеликий зсув перспективи
     "perspective": 0.0,     # Вимкнено — фіксована висота камери
 
@@ -178,7 +178,7 @@ TRAINING_CONFIG = {
     "bgr": 0.0,             # Вимкнено — grayscale
 
     # Композитні аугментації
-    "mosaic": 0.0,          # [YOLO-only] Mosaic аугментація
+    "mosaic": 1.0,          # [YOLO-only] Mosaic аугментація
     "mixup": 0.0,           # Невеликий mixup для регуляризації
     "cutmix": 0.0,          # Вимкнено
     "copy_paste": 0.0,      # [YOLO-only] Copy-paste для малих об'єктів (person)
