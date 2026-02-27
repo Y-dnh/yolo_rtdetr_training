@@ -47,7 +47,7 @@ RTDETR_ONLY_INFERENCE_KEYS: set[str] = set()
 # =============================================================================
 # БАЗОВА КОНФІГУРАЦІЯ: ШЛЯХИ
 # =============================================================================
-PROJECT_NAME = "yolo26s_p2"
+PROJECT_NAME = "yolo26s_pretrained"
 PROJECT_DIR = os.path.join(BASE_DIR, PROJECT_NAME)
 MODEL_PATH = os.path.join(PROJECT_DIR, "baseline", "weights", "best.pt")   # TensorRT FP16 модель
 
