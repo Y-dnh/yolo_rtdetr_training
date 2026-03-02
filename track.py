@@ -47,7 +47,7 @@ RTDETR_ONLY_INFERENCE_KEYS: set[str] = set()
 # =============================================================================
 # БАЗОВА КОНФІГУРАЦІЯ: ШЛЯХИ
 # =============================================================================
-PROJECT_NAME = "yolo26s_pretrained"
+PROJECT_NAME = "yolo26s_p2"
 PROJECT_DIR = os.path.join(BASE_DIR, PROJECT_NAME)
 MODEL_PATH = os.path.join(PROJECT_DIR, "baseline", "weights", "best.pt")   # TensorRT FP16 модель
 
@@ -68,7 +68,7 @@ DETECTION_INTERVAL = 10   # BENCHMARK: детекція кожен кадр
 INFERENCE_CONFIG = {
     "conf": 0.25,            # мінімальний confidence детекції (нижче — відкидається)
     "iou": 0.5,              # IoU поріг для NMS (об'єднання дублікатів боксів)
-    "imgsz": 1024,            # розмір зображення на вході моделі (краще як у навчанні)
+    "imgsz": 1024,           # розмір зображення на вході моделі (краще як у навчанні)
     "max_det": 300,          # максимум детекцій на один кадр
     "half": True,            # FP16 інференс (швидше на GPU)
     "device": 0,             # 0 = CUDA GPU (було None — падало на CPU)

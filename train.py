@@ -11,6 +11,7 @@
 import os
 import sys
 import re
+import yaml
 
 # Фікс для правильного відображення tqdm у Windows PowerShell
 if sys.platform == 'win32':
@@ -21,6 +22,7 @@ if sys.platform == 'win32':
 import random
 import numpy as np
 import torch
+import albumentations as A
 from ultralytics import YOLO, RTDETR
 import ultralytics
 
@@ -37,8 +39,8 @@ MODEL_TYPE = "yolo"        # <-- ПЕРЕМИКАЧ: "yolo" або "rtdetr"
 SEED = 42
 
 # --- YOLO конфіг ---
-PROJECT_NAME = "yolo26s_p2"
-PRETRAINED_MODEL = "yolo26s-p2.yaml"
+PROJECT_NAME = "yolo26m"
+PRETRAINED_MODEL = "yolo26m.pt"
 
 # --- Transfer Learning для YAML моделей (P2/P6 та інші кастомні архітектури) ---
 # Якщо True і model_path є .yaml файл — автоматично завантажить базові ваги (.pt)
@@ -51,11 +53,12 @@ YAML_TRANSFER_LEARNING = True
 # --- RT-DETR конфіг (розкоментувати при MODEL_TYPE = "rtdetr") ---
 # PROJECT_NAME = "rtdetr-x_for_autolabelling"
 # PRETRAINED_MODEL = "rtdetr-x.pt"  # rtdetr-l.pt або rtdetr-x.pt
-# Шляхи до даних
+# Шляхи до даних: все під runs/<назва проєкту>/ (тут тренування та валідації)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+RUNS_DIR = os.path.join(BASE_DIR, "runs")
 # DATASET_ROOT = os.path.join(BASE_DIR, "dataset_split")
 DATASET_ROOT = "D:/dataset_for_training"
-PROJECT_DIR = os.path.join(BASE_DIR, PROJECT_NAME)
+PROJECT_DIR = os.path.join(RUNS_DIR, PROJECT_NAME)
 YAML_PATH = os.path.join(DATASET_ROOT, "data.yaml")
 
 
@@ -89,10 +92,11 @@ YOLO_ONLY_EXPORT_KEYS = {
 
 
 # ============================================================================
-# ПАРАМЕТРИ НАВЧАННЯ (передаються як **kwargs до model.train())
-# =============================================================================
+# ПАРАМЕТРИ НАВЧАННЯ (без аугментацій; аугментації нижче)
+# У get_train_config() додаються **AUGMENTATION_CONFIG → фільтр по MODEL_TYPE.
+# У train_model() додається config["augmentations"] = CUSTOM_TRANSFORMS → model.train(**config).
+# ============================================================================
 TRAINING_CONFIG = {
-    # Модель та дані
     "data": YAML_PATH,
     "project": PROJECT_DIR,
     "name": "baseline",
@@ -101,11 +105,11 @@ TRAINING_CONFIG = {
     # ==========================================================================
     # ЗАГАЛЬНІ ПАРАМЕТРИ НАВЧАННЯ ДЛЯ IR (ТЕПЛОВІЗІЙНИХ) ЗОБРАЖЕНЬ
     # ==========================================================================
-    "epochs": 100,          # Більше епох для кращої збіжності на IR даних
+    "epochs": 50,          # Більше епох для кращої збіжності на IR даних
     "time": None,
-    "patience": 20,        # Більше терпіння - IR дані можуть потребувати більше часу
-    "batch": 8,            # Менший batch для великої моделі
-    "imgsz": 1024,         # Стандартний розмір
+    "patience": 10,
+    "batch": 4,
+    "imgsz": 1024,
     "save": True,
     "save_period": -1,
     "cache": False,
@@ -117,9 +121,9 @@ TRAINING_CONFIG = {
     "classes": None,
     "rect": False,          # Rectangular training — зберігає aspect ratio
     "multi_scale": False,   # [YOLO-only] Multi-scale для кращої генералізації
-    "cos_lr": False,        # Cosine LR scheduler — плавніше навчання. RT-DETR рекомендовано: True
+    "cos_lr": True,         # Плавне косинусне згасання LR (обов'язково для IR)
     "close_mosaic": 10,     # [YOLO-only] Вимкнути mosaic пізніше для fine-tuning
-    "resume": True,
+    "resume": False,
     "amp": False,
     "fraction": 1.0,
     "profile": False,
@@ -131,12 +135,12 @@ TRAINING_CONFIG = {
     # ==========================================================================
     # ОПТИМІЗАТОР ТА LEARNING RATE ДЛЯ IR ЗОБРАЖЕНЬ
     # ==========================================================================
-    "pretrained": False,
-    "optimizer": "AdamW",
-    "lr0": 0.001,             # RT-DETR рекомендовано: 0.0001 (трансформер потребує нижчий LR)
-    "lrf": 0.01,
-    "momentum": 0.937,        # AdamW зазвичай має beta1=0.937
-    "weight_decay": 0.0005,
+    "pretrained": True,
+    "optimizer": "SGD",       # SGD для глибшого та плавнішого пошуку мінімуму
+    "lr0": 0.01,              # Стартовий LR для SGD
+    "lrf": 0.01,              # Кінцевий LR
+    "momentum": 0.937,
+    "weight_decay": 0.001,    # Посилений штраф для боротьби з оверфітом
     "warmup_epochs": 3.0,    # RT-DETR рекомендовано: 5.0 (більше warmup для трансформера)
     "warmup_momentum": 0.5,
     "warmup_bias_lr": 0.01,
@@ -146,9 +150,9 @@ TRAINING_CONFIG = {
     # YOLO: box + cls + dfl
     # RT-DETR: Hungarian matching + GIOU + L1 + CE (dfl/nbs/overlap_mask/... ігноруються)
     # ==========================================================================
-    "box": 7.5,             # Вага box loss (спільний)
-    "cls": 1.0,             # Збільшено — важливо розрізняти ...
-    "dfl": 1.5,             # [YOLO-only] Distribution Focal Loss
+    "box": 10.0,            # Пріоритет на точність рамок (мікро-об'єкти)
+    "cls": 1.0,
+    "dfl": 2.0,             # [YOLO-only] Ідеальне облягання країв об'єктів
     "pose": 12.0,           # [YOLO-only] Pose estimation loss weight
     "kobj": 1.0,            # [YOLO-only] Keypoint objectness
     "nbs": 64,              # [YOLO-only] Nominal batch size
@@ -156,38 +160,42 @@ TRAINING_CONFIG = {
     "mask_ratio": 4,        # [YOLO-only] Mask ratio
     "dropout": 0.0,
     "label_smoothing": 0.0,
-
-    # ==========================================================================
-    # АУГМЕНТАЦІЯ ДЛЯ ІНФРАЧЕРВОНИХ (ТЕПЛОВІЗІЙНИХ) ЗОБРАЖЕНЬ
-    # ==========================================================================
-    # HSV аугментації вимкнені — зображення вже grayscale
-    "hsv_h": 0.0,           # Вимкнено — немає кольору
-    "hsv_s": 0.0,           # Вимкнено — немає насиченості
-    "hsv_v": 0.4,           # Невелика варіація яскравості
-
-    # Геометричні трансформації
-    "degrees": 5.0,         # Мінімальний поворот — камера на мачті стабільна
-    "translate": 0.15,      # Зсув зображення
-    "scale": 0.1,           # Масштабування (об'єкти на різних відстанях)
-    "shear": 2.0,           # Невеликий зсув перспективи
-    "perspective": 0.0,     # Вимкнено — фіксована висота камери
-
-    # Відображення
-    "flipud": 0.0,          # Вимкнено — камера завжди зверху
-    "fliplr": 0.5,          # Горизонтальне відображення
-    "bgr": 0.0,             # Вимкнено — grayscale
-
-    # Композитні аугментації
-    "mosaic": 1.0,          # [YOLO-only] Mosaic аугментація
-    "mixup": 0.0,           # Невеликий mixup для регуляризації
-    "cutmix": 0.0,          # Вимкнено
-    "copy_paste": 0.0,      # [YOLO-only] Copy-paste для малих об'єктів (person)
-    "copy_paste_mode": "flip",  # [YOLO-only]
-
-    # Інші аугментації
-    "auto_augment": "",     # Вимкнено — стандартні аугментації не для IR
-    "erasing": 0.3,         # Random erasing для регуляризації
 }
+
+# =============================================================================
+# АУГМЕНТАЦІЯ (вбудована YOLO/RT-DETR). Додається в get_train_config(): {**TRAINING_CONFIG, **AUGMENTATION_CONFIG, **kwargs}
+# =============================================================================
+AUGMENTATION_CONFIG = {
+    "hsv_h": 0.0,
+    "hsv_s": 0.0,
+    "hsv_v": 0.6,
+    "degrees": 5.0,
+    "translate": 0.2,
+    "scale": 0.25,
+    "shear": 2.0,
+    "perspective": 0.0,
+    "flipud": 0.0,
+    "fliplr": 0.5,
+    "bgr": 0.0,
+    "mosaic": 1.0,
+    "mixup": 0.0,
+    "cutmix": 0.0,
+    "copy_paste": 0.0,
+    "copy_paste_mode": "flip",
+    "auto_augment": "",
+    "erasing": 0.0,
+}
+
+# Уніфікований пайплайн Albumentations; передається в model.train(augmentations=CUSTOM_TRANSFORMS)
+# Albumentations 2.x: GaussNoise — std_range (не var_limit); RandomFog — fog_coef_range (не fog_coef_lower/upper)
+CUSTOM_TRANSFORMS = [
+    A.CLAHE(clip_limit=4.0, tile_grid_size=(8, 8), p=0.4),
+    A.RandomGamma(gamma_limit=(80, 120), p=0.3),
+    A.GaussNoise(std_range=(0.05, 0.2), p=0.4),
+    A.ISONoise(color_shift=(0.01, 0.01), intensity=(0.1, 0.5), p=0.3),
+    A.RandomFog(fog_coef_range=(0.1, 0.3), alpha_coef=0.1, p=0.2),
+    A.PixelDropout(dropout_prob=0.01, per_channel=False, p=0.2),
+]
 
 
 # =============================================================================
@@ -206,6 +214,50 @@ EXPORT_CONFIG = {
     "batch": 1,                 # Batch size
     "device": 0,                # None = авто, 0 = GPU, "cpu" = CPU
 }
+
+
+def _albu_transform_to_info(t) -> dict:
+    """З об'єкта Albumentations трансформа витягує name, p та params для YAML."""
+    out = {"name": type(t).__name__, "p": getattr(t, "p", None)}
+    try:
+        names = t.get_transform_init_args_names()
+        out["params"] = {k: getattr(t, k, None) for k in names if k != "p"}
+        # tuple -> list для YAML
+        for k, v in out["params"].items():
+            if isinstance(v, tuple):
+                out["params"][k] = list(v)
+    except Exception:
+        out["params"] = {}
+    return out
+
+
+def get_albu_augmentations_info():
+    """Опис CUSTOM_TRANSFORMS для збереження в augmentations_info.yaml (один джерело — константа CUSTOM_TRANSFORMS)."""
+    if CUSTOM_TRANSFORMS is None:
+        return None
+    return {
+        "description": "Custom Albumentations pipeline (list from global CUSTOM_TRANSFORMS)",
+        "transforms": [_albu_transform_to_info(t) for t in CUSTOM_TRANSFORMS],
+    }
+
+
+def _write_augmentations_info_to_path(path: str, info: dict) -> None:
+    """Записує словник info у path (YAML)."""
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.dump(info, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+
+def _save_augmentations_info(save_dir: str, *, resume: bool = False) -> None:
+    """Записує опис CUSTOM_TRANSFORMS у save_dir; ім'я файлу augmentations_info_resume.yaml при resume, інакше augmentations_info.yaml."""
+    if CUSTOM_TRANSFORMS is None:
+        return
+    info = get_albu_augmentations_info()
+    if info is None:
+        return
+    name = "augmentations_info_resume.yaml" if resume else "augmentations_info.yaml"
+    path = os.path.join(save_dir, name)
+    _write_augmentations_info_to_path(path, info)
+    print(f"[Config] Опис Albumentations збережено: {path}")
 
 
 def validate_model_type() -> None:
@@ -334,15 +386,16 @@ def filter_config(config: dict, excluded_keys: set) -> dict:
 
 def get_train_config(**kwargs) -> dict:
     """
-    Повертає відфільтрований training config для поточного MODEL_TYPE.
-    
+    Збирає конфіг: TRAINING_CONFIG + AUGMENTATION_CONFIG + kwargs, потім фільтр по MODEL_TYPE.
+    У train_model() ще додається config["augmentations"] = CUSTOM_TRANSFORMS.
+
     Args:
-        **kwargs: Параметри, що перезаписують TRAINING_CONFIG
-    
+        **kwargs: Параметри, що перезаписують TRAINING_CONFIG /  AUGMENTATION_CONFIG
+
     Returns:
-        dict: Готовий конфіг для model.train()
+        dict: Базовий конфіг для model.train() (augmentations додається в train_model).
     """
-    config = {**TRAINING_CONFIG, **kwargs}
+    config = {**TRAINING_CONFIG, **AUGMENTATION_CONFIG, **kwargs}
 
     if MODEL_TYPE == "rtdetr":
         return filter_config(config, YOLO_ONLY_TRAIN_KEYS)
@@ -385,6 +438,7 @@ def setup_environment() -> str:
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
+    os.makedirs(RUNS_DIR, exist_ok=True)
     os.makedirs(PROJECT_DIR, exist_ok=True)
     
     print(f"Device: {device}")
@@ -407,9 +461,18 @@ def train_model(
     Returns:
         tuple: (results, trained_model_path)
     """
-    # Отримуємо відфільтрований конфіг для поточного MODEL_TYPE
+    # Збір фінального конфігу: TRAINING_CONFIG + kwargs (фільтр по MODEL_TYPE),
+    # потім дописуємо глобальний пайплайн Albumentations → один dict для model.train(**config)
     config = get_train_config(**kwargs)
-    
+    config["augmentations"] = CUSTOM_TRANSFORMS
+
+    # Бекап опису аугментацій у project/ — буде доступний навіть при перериванні тренування
+    info = get_albu_augmentations_info()
+    if info is not None:
+        latest_path = os.path.join(config["project"], "augmentations_info_latest.yaml")
+        os.makedirs(config["project"], exist_ok=True)
+        _write_augmentations_info_to_path(latest_path, info)
+
     print(f"Завантаження моделі: {model_path}")
     model = load_model(model_path)
     
@@ -419,17 +482,36 @@ def train_model(
     print(f"Конфігурація: epochs={config['epochs']}, batch={config['batch']}, imgsz={config['imgsz']}")
     print(f"Оптимізатор: {config['optimizer']}, lr0={config['lr0']}, cos_lr={config['cos_lr']}")
     
-    # Навчання моделі
-    results = model.train(**config)
-    
-    # Шлях до найкращої моделі
-    trained_model_path = os.path.join(
-        config["project"],
-        config["name"],
-        "weights",
-        "best.pt"
-    )
-    
+    # Навчання моделі (augmentations передаються для YOLO та RT-DETR; при несумісності — зрозуміла помилка)
+    try:
+        results = model.train(**config)
+    except TypeError as e:
+        if "augmentations" in str(e).lower() or "unexpected keyword" in str(e).lower():
+            raise RuntimeError(
+                f"Помилка при виклику model.train(): ймовірно, параметр 'augmentations' "
+                f"(кастомні Albumentations) не підтримується для MODEL_TYPE='{MODEL_TYPE}'. "
+                f"Оригінальна помилка: {e}"
+            ) from e
+        raise
+    except Exception as e:
+        raise RuntimeError(
+            f"Помилка навчання (MODEL_TYPE='{MODEL_TYPE}'): {e}. "
+            f"Перевірте параметри конфігу, зокрема 'augmentations' при використанні RT-DETR."
+        ) from e
+
+    # Фактичну теку запуску створив Ultralytics (results.save_dir); туди пишемо augmentations_info[ _resume].yaml
+    save_dir = str(results.save_dir)
+    _save_augmentations_info(save_dir, resume=config.get("resume", False))
+    # Після успішного завершення прибираємо бекап із project/ — він більше не потрібен
+    latest_path = os.path.join(config["project"], "augmentations_info_latest.yaml")
+    if os.path.isfile(latest_path):
+        try:
+            os.remove(latest_path)
+        except OSError:
+            pass
+
+    trained_model_path = os.path.join(save_dir, "weights", "best.pt")
+
     print("Навчання завершено!")
     print(f"Найкраща модель збережена: {trained_model_path}")
     

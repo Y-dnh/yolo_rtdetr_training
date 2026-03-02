@@ -239,6 +239,8 @@ ehthumbs.db
 dataset/
 old_dataset_runs/
 dataset_split/
+runs/
 yolo26s_pretrained/
 yolo26s_yaml/
 tracked_videos/
+yolo26s_p2/

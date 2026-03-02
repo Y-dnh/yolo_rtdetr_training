@@ -44,12 +44,13 @@ YOLO_ONLY_VAL_KEYS = {
 RTDETR_ONLY_VAL_KEYS: set[str] = set()
 
 # =============================================================================
-# БАЗОВА КОНФІГУРАЦІЯ
+# БАЗОВА КОНФІГУРАЦІЯ (результати під runs/<назва проєкту>/ разом із тренуваннями)
 # =============================================================================
-PROJECT_NAME = "yolo26s_yaml"
+PROJECT_NAME = "yolo26s_p2"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_DIR = os.path.join(BASE_DIR, PROJECT_NAME)
+RUNS_DIR = os.path.join(BASE_DIR, "runs")
+PROJECT_DIR = os.path.join(RUNS_DIR, PROJECT_NAME)
 # DATASET_ROOT = os.path.join(BASE_DIR, "dataset_split")
 DATASET_ROOT = "D:/dataset_for_training"
 YAML_PATH = os.path.join(DATASET_ROOT, "data.yaml")
@@ -71,7 +72,7 @@ CLASSES = {
 VALIDATION_CONFIG = {
     # Параметри датасету
     "data": YAML_PATH,
-    "split": "test",
+    "split": "val",
     
     # Параметри детекції
     "conf": 0.25,
