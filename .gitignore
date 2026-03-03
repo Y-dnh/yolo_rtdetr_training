@@ -244,3 +244,5 @@ yolo26s_pretrained/
 yolo26s_yaml/
 tracked_videos/
 yolo26s_p2/
+*.yaml
+wsl_yolo_training_env/

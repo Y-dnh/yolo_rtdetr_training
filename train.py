@@ -11,7 +11,11 @@
 import os
 import sys
 import re
-import yaml
+import tempfile
+try:
+    import yaml
+except ModuleNotFoundError:
+    from yaml_shim import yaml  # fallback якщо PyYAML зламаний (наприклад Windows wheel 6.x)
 
 # Фікс для правильного відображення tqdm у Windows PowerShell
 if sys.platform == 'win32':
@@ -57,7 +61,8 @@ YAML_TRANSFER_LEARNING = True
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 RUNS_DIR = os.path.join(BASE_DIR, "runs")
 # DATASET_ROOT = os.path.join(BASE_DIR, "dataset_split")
-DATASET_ROOT = "D:/dataset_for_training"
+# У WSL задай: export YOLO_DATASET_ROOT=/mnt/d/dataset_for_training
+DATASET_ROOT = os.environ.get("YOLO_DATASET_ROOT", "D:/dataset_for_training")
 PROJECT_DIR = os.path.join(RUNS_DIR, PROJECT_NAME)
 YAML_PATH = os.path.join(DATASET_ROOT, "data.yaml")
 
@@ -108,13 +113,13 @@ TRAINING_CONFIG = {
     "epochs": 50,          # Більше епох для кращої збіжності на IR даних
     "time": None,
     "patience": 10,
-    "batch": 4,
+    "batch": 8,
     "imgsz": 1024,
     "save": True,
     "save_period": -1,
     "cache": False,
     "device": 0,
-    "workers": 8,
+    "workers": 12,
     "seed": SEED,
     "deterministic": True,
     "single_cls": False,
@@ -137,11 +142,11 @@ TRAINING_CONFIG = {
     # ==========================================================================
     "pretrained": True,
     "optimizer": "SGD",       # SGD для глибшого та плавнішого пошуку мінімуму
-    "lr0": 0.01,              # Стартовий LR для SGD
+    "lr0": 0.005,             # Стартовий LR для SGD
     "lrf": 0.01,              # Кінцевий LR
     "momentum": 0.937,
     "weight_decay": 0.001,    # Посилений штраф для боротьби з оверфітом
-    "warmup_epochs": 3.0,    # RT-DETR рекомендовано: 5.0 (більше warmup для трансформера)
+    "warmup_epochs": 5.0,     # RT-DETR рекомендовано: 5.0 (більше warmup для трансформера)
     "warmup_momentum": 0.5,
     "warmup_bias_lr": 0.01,
 
@@ -482,22 +487,42 @@ def train_model(
     print(f"Конфігурація: epochs={config['epochs']}, batch={config['batch']}, imgsz={config['imgsz']}")
     print(f"Оптимізатор: {config['optimizer']}, lr0={config['lr0']}, cos_lr={config['cos_lr']}")
     
-    # Навчання моделі (augmentations передаються для YOLO та RT-DETR; при несумісності — зрозуміла помилка)
+    # Ultralytics розв'язує path з data.yaml відносно cwd, а не відносно папки yaml — підставляємо абсолютний dataset root
+    data_yaml_path = config["data"]
     try:
-        results = model.train(**config)
-    except TypeError as e:
-        if "augmentations" in str(e).lower() or "unexpected keyword" in str(e).lower():
-            raise RuntimeError(
-                f"Помилка при виклику model.train(): ймовірно, параметр 'augmentations' "
-                f"(кастомні Albumentations) не підтримується для MODEL_TYPE='{MODEL_TYPE}'. "
-                f"Оригінальна помилка: {e}"
-            ) from e
-        raise
+        with open(data_yaml_path, "r", encoding="utf-8") as f:
+            data_cfg = yaml.safe_load(f)
     except Exception as e:
-        raise RuntimeError(
-            f"Помилка навчання (MODEL_TYPE='{MODEL_TYPE}'): {e}. "
-            f"Перевірте параметри конфігу, зокрема 'augmentations' при використанні RT-DETR."
-        ) from e
+        raise RuntimeError(f"Не вдалося прочитати data.yaml: {data_yaml_path}: {e}") from e
+    data_cfg["path"] = os.path.abspath(DATASET_ROOT)
+    tmp_fd, tmp_yaml = tempfile.mkstemp(suffix=".yaml", prefix="yolo_data_")
+    try:
+        os.close(tmp_fd)
+        with open(tmp_yaml, "w", encoding="utf-8") as f:
+            yaml.dump(data_cfg, f, default_flow_style=False, allow_unicode=True)
+        config["data"] = tmp_yaml
+        # Навчання моделі (augmentations передаються для YOLO та RT-DETR; при несумісності — зрозуміла помилка)
+        try:
+            results = model.train(**config)
+        except TypeError as e:
+            if "augmentations" in str(e).lower() or "unexpected keyword" in str(e).lower():
+                raise RuntimeError(
+                    f"Помилка при виклику model.train(): ймовірно, параметр 'augmentations' "
+                    f"(кастомні Albumentations) не підтримується для MODEL_TYPE='{MODEL_TYPE}'. "
+                    f"Оригінальна помилка: {e}"
+                ) from e
+            raise
+        except Exception as e:
+            raise RuntimeError(
+                f"Помилка навчання (MODEL_TYPE='{MODEL_TYPE}'): {e}. "
+                f"Перевірте параметри конфігу, зокрема 'augmentations' при використанні RT-DETR."
+            ) from e
+    finally:
+        if os.path.isfile(tmp_yaml):
+            try:
+                os.remove(tmp_yaml)
+            except OSError:
+                pass
 
     # Фактичну теку запуску створив Ultralytics (results.save_dir); туди пишемо augmentations_info[ _resume].yaml
     save_dir = str(results.save_dir)

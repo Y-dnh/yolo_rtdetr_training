@@ -132,6 +132,49 @@ pip install -r requirements.txt
 python -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}')"
 ```
 
+### Запуск у WSL (Linux)
+
+Проєкт можна повністю використовувати з WSL2: ті самі скрипти, конфіги та датасет на диску `D:` (доступний як `/mnt/d/` — копіювати нічого не потрібно).
+
+1. **Шлях до даних**  
+   У `train.py` і `validate.py` шлях до датасету береться з змінної середовища `YOLO_DATASET_ROOT`. Якщо вона не задана, використовується `D:/dataset_for_training` (Windows).
+
+2. **Формат `data.yaml` датасету (обов'язково для WSL)**  
+   У файлі **`D:\dataset_for_training\data.yaml`** мають бути **відносні** шляхи, а не абсолютні Windows-шляхи. Інакше в WSL виникне помилка на кшталт `missing path '.../d:\dataset_for_training\valid\images'`.
+
+   **Правильно** (працює і в Windows, і в WSL):
+   ```yaml
+   path: .
+   train: train/images
+   val: valid/images
+   nc: 3
+   names: ['person', 'car', 'truck']
+   ```
+
+   **Неправильно:** `path: D:/dataset_for_training` або `train: D:/dataset_for_training/train/images` — такі шляхи в WSL дають змішані шляхи і помилку.
+
+3. **У WSL один раз у сесії (або в `~/.bashrc`):**
+   ```bash
+   export YOLO_DATASET_ROOT=/mnt/d/dataset_for_training
+   ```
+
+4. **Створити env і встановити залежності (у WSL):**
+   ```bash
+   cd /mnt/d/projects_yaroslav/yolo_training
+   conda create -n yolo_training_env python=3.11 -y
+   conda activate yolo_training_env
+   pip install -r requirements.txt
+   ```
+
+5. **Запуск тренування:**
+   ```bash
+   export YOLO_DATASET_ROOT=/mnt/d/dataset_for_training
+   python train.py
+   ```
+   Валідація: той самий `export`, далі `python validate.py` (при потребі зміни `PROJECT_NAME` та шлях до ваг у `validate.py`).
+
+6. **GPU у WSL2:** потрібен драйвер NVIDIA у Windows та [CUDA Toolkit для WSL](https://developer.nvidia.com/cuda-downloads?target_os=Linux&target_arch=x86_64&Distribution=WSLUbuntu). Після цього PyTorch побачить GPU.
+
 ## Використання
 
 ### Перемикач архітектури

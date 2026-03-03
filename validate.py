@@ -9,8 +9,13 @@
 
 import os
 import json
+import tempfile
 from pathlib import Path
 from datetime import datetime
+try:
+    import yaml
+except ModuleNotFoundError:
+    from yaml_shim import yaml  # fallback якщо PyYAML зламаний (наприклад Windows wheel 6.x)
 import torch
 from ultralytics import YOLO, RTDETR
 
@@ -52,7 +57,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 RUNS_DIR = os.path.join(BASE_DIR, "runs")
 PROJECT_DIR = os.path.join(RUNS_DIR, PROJECT_NAME)
 # DATASET_ROOT = os.path.join(BASE_DIR, "dataset_split")
-DATASET_ROOT = "D:/dataset_for_training"
+# У WSL задай: export YOLO_DATASET_ROOT=/mnt/d/dataset_for_training
+DATASET_ROOT = os.environ.get("YOLO_DATASET_ROOT", "D:/dataset_for_training")
 YAML_PATH = os.path.join(DATASET_ROOT, "data.yaml")
 EXPERIMENT_NAME = "validation_26s_yaml"
 
@@ -232,8 +238,27 @@ def validate_model(
     model = load_model(model_path)
     print(f"[Validator] Model loaded successfully!")
     
-    # Запуск валідації
-    results = model.val(**config)
+    # Ultralytics розв'язує path з data.yaml відносно cwd — підставляємо абсолютний dataset root (як у train.py)
+    data_yaml_path = config["data"]
+    try:
+        with open(data_yaml_path, "r", encoding="utf-8") as f:
+            data_cfg = yaml.safe_load(f)
+    except Exception as e:
+        raise RuntimeError(f"Не вдалося прочитати data.yaml: {data_yaml_path}: {e}") from e
+    data_cfg["path"] = os.path.abspath(DATASET_ROOT)
+    tmp_fd, tmp_yaml = tempfile.mkstemp(suffix=".yaml", prefix="yolo_data_")
+    try:
+        os.close(tmp_fd)
+        with open(tmp_yaml, "w", encoding="utf-8") as f:
+            yaml.dump(data_cfg, f, default_flow_style=False, allow_unicode=True)
+        config["data"] = tmp_yaml
+        results = model.val(**config)
+    finally:
+        if os.path.isfile(tmp_yaml):
+            try:
+                os.remove(tmp_yaml)
+            except OSError:
+                pass
     
     return results
 
