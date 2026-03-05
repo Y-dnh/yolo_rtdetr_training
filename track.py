@@ -51,7 +51,7 @@ RTDETR_ONLY_INFERENCE_KEYS: set[str] = set()
 # =============================================================================
 # БАЗОВА КОНФІГУРАЦІЯ: ШЛЯХИ
 # =============================================================================
-PROJECT_NAME = "yolo26s_p2"
+PROJECT_NAME = "yolo26s_pretrained"
 RUNS_DIR = os.path.join(BASE_DIR, "runs")
 # У WSL задай: export YOLO_DATASET_ROOT=/mnt/d/dataset_for_training
 DATASET_ROOT = os.environ.get("YOLO_DATASET_ROOT", "D:/dataset_for_training")
@@ -62,14 +62,14 @@ MODEL_PATH = os.path.join(PROJECT_DIR, "baseline", "weights", "best.pt")   # Ten
 # Вхідне відео або папка з відео для трекінгу.
 # Якщо вказана папка — опрацьовуються всі відеофайли у ній (рекурсивно не шукаємо).
 # Вихід: tracked_videos/<назва_моделі>/<ім'я_відео>_tracked.mp4 та .txt з логами.
-VIDEO_INPUT_PATH = "D:/work/test3.mp4"
+VIDEO_INPUT_PATH = "D:/work/test2.mp4"
 
 # Розширення файлів, що вважаються відео (при вказівці папки).
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".wmv", ".flv"}
 
 # Benchmark: True = профайлінг (заміри по фазах, звіт _benchmark.txt)
-BENCHMARK_MODE = False
-BENCHMARK_CUDA_SYNC = False
+BENCHMARK_MODE = True
+BENCHMARK_CUDA_SYNC = True
 BENCHMARK_WRITE_VIDEO = True   # False = тільки профайлінг, без запису відео
 BENCHMARK_MAX_FRAMES = None    # None = все відео
 
@@ -434,11 +434,14 @@ def _generate_benchmark_report(stats: BenchmarkStats, pipeline_total: float,
     if stats.detection_frame_count > 0:
         lines.append(f"  Avg detections/frame: {stats.total_detections / stats.detection_frame_count:.1f}")
     if det_only:
+        det_total = phase_totals["Detection (GPU)"]
+        det_fps = stats.detection_frame_count / det_total if det_total > 0 else 0
         lines.extend([
             f"  Detection time (det frames only):",
             f"    Avg: {_fmt_ms(sum(det_only) / len(det_only))} ms",
             f"    Min: {_fmt_ms(min(det_only))} ms",
             f"    Max: {_fmt_ms(max(det_only))} ms",
+            f"  Detection speed:      {det_fps:.1f} inf/s  (інференсів на секунду)",
         ])
     lines.extend([
         "",
@@ -447,6 +450,9 @@ def _generate_benchmark_report(stats: BenchmarkStats, pipeline_total: float,
     ])
     if n > 0:
         lines.append(f"  Avg tracks/frame:     {stats.total_tracks_drawn / n:.1f}")
+    track_total = phase_totals["Tracker (CPU)"]
+    track_avg_ms = (track_total / n * 1000) if n > 0 and track_total > 0 else 0
+    track_fps = 1000 / track_avg_ms if track_avg_ms > 0 else 0
     if track_with_det_times:
         lines.extend([
             f"  Tracker on det frames:",
@@ -457,7 +463,12 @@ def _generate_benchmark_report(stats: BenchmarkStats, pipeline_total: float,
             f"  Tracker on non-det frames:",
             f"    Avg: {_fmt_ms(sum(track_only_times) / len(track_only_times))} ms",
         ])
+    if track_total > 0:
+        lines.append(f"  Tracker speed:        {track_avg_ms:.1f} ms/frame  ({track_fps:.0f} frames/s по трекеру)")
     io_total = phase_totals["Frame Read (I/O)"] + phase_totals["Frame Write (I/O)"]
+    compute_total = phase_totals["Detection (GPU)"] + phase_totals["Tracker (CPU)"]
+    compute_fps = n / compute_total if compute_total > 0 else 0
+
     lines.extend([
         "",
         "-" * 72, "  I/O", "-" * 72,
@@ -468,8 +479,9 @@ def _generate_benchmark_report(stats: BenchmarkStats, pipeline_total: float,
         f"  Warmup:           {_fmt_ms(stats.warmup_time)} ms",
         "",
         "-" * 72, "  SUMMARY", "-" * 72,
-        f"  Effective FPS:     {effective_fps:.1f}",
-        f"  CUDA Sync:         {BENCHMARK_CUDA_SYNC}",
+        f"  Effective FPS (pipeline):   {effective_fps:.1f}  (з I/O та малюванням)",
+        f"  Compute FPS (det+track):    {compute_fps:.1f}  (тільки детекція + трекінг, без I/O)",
+        f"  CUDA Sync:                  {BENCHMARK_CUDA_SYNC}",
         "",
         "=" * 72,
     ])
@@ -498,7 +510,8 @@ def run_tracking(
         return None
 
     # Вихід: tracked_videos/<назва_моделі>/<ім'я_відео>_tracked.mp4 та .txt
-    model_name = f"{PROJECT_NAME}_{Path(model_path).stem}"
+    stem = Path(model_path).stem
+    model_name = PROJECT_NAME if stem == PROJECT_NAME else f"{PROJECT_NAME}_{stem}"
     output_dir = os.path.join(BASE_DIR, "tracked_videos", model_name)
     os.makedirs(output_dir, exist_ok=True)
     video_stem = Path(video_input_path).stem
