@@ -6,6 +6,8 @@
 Перемикач MODEL_TYPE дозволяє обрати архітектуру:
   - "yolo"   -> ultralytics.YOLO
   - "rtdetr" -> ultralytics.RTDETR
+
+BENCHMARK_MODE=True: детальний профайлінг (час кожної фази, FPS), звіт *_benchmark.txt
 """
 
 import os
@@ -15,6 +17,8 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Tuple
+from numpy._core.numeric import True_
+import torch
 
 # Фікс для правильного відображення tqdm у Windows PowerShell
 if sys.platform == "win32":
@@ -48,19 +52,29 @@ RTDETR_ONLY_INFERENCE_KEYS: set[str] = set()
 # БАЗОВА КОНФІГУРАЦІЯ: ШЛЯХИ
 # =============================================================================
 PROJECT_NAME = "yolo26s_p2"
-PROJECT_DIR = os.path.join(BASE_DIR, PROJECT_NAME)
+RUNS_DIR = os.path.join(BASE_DIR, "runs")
+# У WSL задай: export YOLO_DATASET_ROOT=/mnt/d/dataset_for_training
+DATASET_ROOT = os.environ.get("YOLO_DATASET_ROOT", "D:/dataset_for_training")
+PROJECT_DIR = os.path.join(RUNS_DIR, PROJECT_NAME)
+YAML_PATH = os.path.join(DATASET_ROOT, "data.yaml")
 MODEL_PATH = os.path.join(PROJECT_DIR, "baseline", "weights", "best.pt")   # TensorRT FP16 модель
 
 # Вхідне відео або папка з відео для трекінгу.
 # Якщо вказана папка — опрацьовуються всі відеофайли у ній (рекурсивно не шукаємо).
 # Вихід: tracked_videos/<назва_моделі>/<ім'я_відео>_tracked.mp4 та .txt з логами.
-VIDEO_INPUT_PATH = "D:/videos_for_test"
+VIDEO_INPUT_PATH = "D:/work/test3.mp4"
 
 # Розширення файлів, що вважаються відео (при вказівці папки).
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".wmv", ".flv"}
 
+# Benchmark: True = профайлінг (заміри по фазах, звіт _benchmark.txt)
+BENCHMARK_MODE = False
+BENCHMARK_CUDA_SYNC = False
+BENCHMARK_WRITE_VIDEO = True   # False = тільки профайлінг, без запису відео
+BENCHMARK_MAX_FRAMES = None    # None = все відео
+
 # Як часто запускати детекцію: модель працює тільки на кадрах 1, 1+N, 1+2N, ...; між ними лише NanoTrack.
-DETECTION_INTERVAL = 10   # BENCHMARK: детекція кожен кадр
+DETECTION_INTERVAL = 10
 
 # =============================================================================
 # ПАРАМЕТРИ ІНФЕРЕНСУ (model.predict)
@@ -289,10 +303,184 @@ def draw_tracks(frame: np.ndarray, tracked: list, class_names: dict, colors: lis
                 current_y -= th + VIS_LABEL_PADDING
 
 
+# =============================================================================
+# BENCHMARK (профайлінг пайплайну)
+# =============================================================================
+def _benchmark_sync():
+    """Синхронізація CUDA для точного виміру GPU операцій (лише при BENCHMARK_CUDA_SYNC)."""
+    if BENCHMARK_CUDA_SYNC and torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+def _fmt_ms(seconds: float) -> str:
+    return f"{seconds * 1000:.2f}"
+
+
+def _fmt_pct(part: float, total: float) -> str:
+    if total <= 0:
+        return "0.0%"
+    return f"{part / total * 100:.1f}%"
+
+
+class BenchmarkStats:
+    """Збирач статистики по фазах для benchmark."""
+
+    def __init__(self):
+        self.frame_read_times = []
+        self.detection_times = []
+        self.tracker_update_times = []
+        self.drawing_times = []
+        self.frame_write_times = []
+        self.detection_frame_count = 0
+        self.tracking_only_frame_count = 0
+        self.total_detections = 0
+        self.total_tracks_drawn = 0
+        self.warmup_time = 0.0
+        self.model_load_time = 0.0
+
+    def add_frame(self, read_t, detect_t, tracker_t, draw_t, write_t,
+                  is_detection_frame, num_detections, num_tracks):
+        self.frame_read_times.append(read_t)
+        self.detection_times.append(detect_t)
+        self.tracker_update_times.append(tracker_t)
+        self.drawing_times.append(draw_t)
+        self.frame_write_times.append(write_t)
+        if is_detection_frame:
+            self.detection_frame_count += 1
+        else:
+            self.tracking_only_frame_count += 1
+        self.total_detections += num_detections
+        self.total_tracks_drawn += num_tracks
+
+    @property
+    def n(self):
+        return len(self.frame_read_times)
+
+
+def _generate_benchmark_report(stats: BenchmarkStats, pipeline_total: float,
+                               model_path: str, video_path: str,
+                               device_name: str, gpu_name: str,
+                               width: int, height: int, fps_video: float,
+                               total_frames: int, cfg: dict, has_tracker: bool) -> str:
+    """Генерація текстового звіту benchmark."""
+    n = stats.n
+    if n == 0:
+        return "No frames processed.\n"
+
+    phases = {
+        "Frame Read (I/O)": stats.frame_read_times,
+        "Detection (GPU)": stats.detection_times,
+        "Tracker (CPU)": stats.tracker_update_times,
+        "Drawing (CPU)": stats.drawing_times,
+        "Frame Write (I/O)": stats.frame_write_times,
+    }
+    phase_totals = {name: sum(arr) for name, arr in phases.items()}
+    measured_total = sum(phase_totals.values())
+    overhead = pipeline_total - measured_total
+    effective_fps = n / pipeline_total if pipeline_total > 0 else 0
+    det_only = [stats.detection_times[i] for i in range(n) if stats.detection_times[i] > 0]
+    track_only_times = [stats.tracker_update_times[i] for i in range(n) if stats.detection_times[i] == 0]
+    track_with_det_times = [stats.tracker_update_times[i] for i in range(n) if stats.detection_times[i] > 0]
+
+    lines = [
+        "=" * 72,
+        "  BENCHMARK REPORT: TRACKING PIPELINE PROFILING",
+        "=" * 72,
+        f"  Date:             {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"  Model:            {Path(model_path).name}",
+        f"  Architecture:     {MODEL_TYPE.upper()}",
+        f"  Device:           {device_name}",
+        f"  GPU:              {gpu_name}",
+        f"  Video:            {video_path}",
+        f"  Resolution:       {width}x{height} @ {fps_video:.1f} FPS",
+        f"  Frames processed: {n} / {total_frames}",
+        f"  Detection every:  {DETECTION_INTERVAL} frames",
+        f"  Tracker:          {'NanoTrack v' + NANOTRACK_VERSION if has_tracker else 'None'}",
+        f"  CUDA Sync:        {BENCHMARK_CUDA_SYNC}",
+        "",
+        "  Inference config:",
+    ]
+    for k in ["imgsz", "conf", "iou", "half", "max_det", "device"]:
+        if k in cfg:
+            lines.append(f"    {k:16s} = {cfg[k]}")
+    lines.extend([
+        "",
+        "-" * 72, "  TOTAL PIPELINE", "-" * 72,
+        f"  Wall-clock time:    {pipeline_total:.3f} s",
+        f"  Measured phases:    {measured_total:.3f} s",
+        f"  Overhead (loop):    {overhead:.3f} s ({_fmt_pct(overhead, pipeline_total)})",
+        f"  Effective FPS:      {effective_fps:.1f}",
+        f"  Avg frame time:     {_fmt_ms(pipeline_total / n)} ms",
+        "",
+        "-" * 72, "  TIME BREAKDOWN BY PHASE", "-" * 72,
+        f"  {'Phase':<24s} {'Total (s)':>10s} {'% of total':>10s} {'Avg (ms)':>10s} {'Min (ms)':>10s} {'Max (ms)':>10s}",
+        "  " + "-" * 68,
+    ])
+    for name, arr in phases.items():
+        t_total = sum(arr)
+        t_avg = t_total / n if n > 0 else 0
+        t_min = min(arr) if arr else 0
+        t_max = max(arr) if arr else 0
+        lines.append(f"  {name:<24s} {t_total:>10.3f} {_fmt_pct(t_total, pipeline_total):>10s} {_fmt_ms(t_avg):>10s} {_fmt_ms(t_min):>10s} {_fmt_ms(t_max):>10s}")
+    lines.extend([
+        "  " + "-" * 68,
+        f"  {'SUM (measured)':<24s} {measured_total:>10.3f} {_fmt_pct(measured_total, pipeline_total):>10s} {_fmt_ms(measured_total / n):>10s}",
+        "",
+        "-" * 72, "  DETECTION FRAMES (GPU inference)", "-" * 72,
+        f"  Detection frames:     {stats.detection_frame_count} / {n}",
+        f"  Tracking-only frames: {stats.tracking_only_frame_count} / {n}",
+        f"  Total detections:     {stats.total_detections}",
+    ])
+    if stats.detection_frame_count > 0:
+        lines.append(f"  Avg detections/frame: {stats.total_detections / stats.detection_frame_count:.1f}")
+    if det_only:
+        lines.extend([
+            f"  Detection time (det frames only):",
+            f"    Avg: {_fmt_ms(sum(det_only) / len(det_only))} ms",
+            f"    Min: {_fmt_ms(min(det_only))} ms",
+            f"    Max: {_fmt_ms(max(det_only))} ms",
+        ])
+    lines.extend([
+        "",
+        "-" * 72, "  TRACKER UPDATE (CPU)", "-" * 72,
+        f"  Total tracks drawn:   {stats.total_tracks_drawn}",
+    ])
+    if n > 0:
+        lines.append(f"  Avg tracks/frame:     {stats.total_tracks_drawn / n:.1f}")
+    if track_with_det_times:
+        lines.extend([
+            f"  Tracker on det frames:",
+            f"    Avg: {_fmt_ms(sum(track_with_det_times) / len(track_with_det_times))} ms",
+        ])
+    if track_only_times:
+        lines.extend([
+            f"  Tracker on non-det frames:",
+            f"    Avg: {_fmt_ms(sum(track_only_times) / len(track_only_times))} ms",
+        ])
+    io_total = phase_totals["Frame Read (I/O)"] + phase_totals["Frame Write (I/O)"]
+    lines.extend([
+        "",
+        "-" * 72, "  I/O", "-" * 72,
+        f"  Total I/O time:   {io_total:.3f} s ({_fmt_pct(io_total, pipeline_total)})",
+        "",
+        "-" * 72, "  INITIALIZATION", "-" * 72,
+        f"  Model load:       {_fmt_ms(stats.model_load_time)} ms",
+        f"  Warmup:           {_fmt_ms(stats.warmup_time)} ms",
+        "",
+        "-" * 72, "  SUMMARY", "-" * 72,
+        f"  Effective FPS:     {effective_fps:.1f}",
+        f"  CUDA Sync:         {BENCHMARK_CUDA_SYNC}",
+        "",
+        "=" * 72,
+    ])
+    return "\n".join(lines)
+
+
 def run_tracking(
     video_input_path: str,
     model_path: str = MODEL_PATH,
     detection_interval: int = DETECTION_INTERVAL,
+    benchmark_mode: bool = False,
 ) -> str | None:
     """
     Головний пайплайн: відкрити відео, детекція кожні detection_interval кадрів,
@@ -316,6 +504,9 @@ def run_tracking(
     video_stem = Path(video_input_path).stem
     output_path = os.path.join(output_dir, f"{video_stem}_tracked.mp4")
     log_path = os.path.join(output_dir, f"{video_stem}_tracked.txt")
+    benchmark_log_path = os.path.join(output_dir, f"{video_stem}_benchmark.txt")
+
+    benchmark_stats = BenchmarkStats() if benchmark_mode else None
 
     # use_nano = False  # BENCHMARK: вимкнено NanoTrack
     use_nano = os.path.isfile(NANOTRACK_BACKBONE) and os.path.isfile(NANOTRACK_NECKHEAD)
@@ -326,24 +517,34 @@ def run_tracking(
         )
 
     print(f"Завантаження моделі: {Path(model_path).name}")
+    t0 = time.perf_counter()
     model = load_model(model_path)
+    if benchmark_stats is not None:
+        benchmark_stats.model_load_time = time.perf_counter() - t0
     class_names = getattr(model, "names", None) or CLASS_NAMES
 
     # Warmup: переносить модель на цільовий девайс і прогріває
     cfg_warmup = get_inference_config()
     cfg_warmup = {k: v for k, v in cfg_warmup.items() if v is not None}
     dummy = np.zeros((64, 64, 3), dtype=np.uint8)
+    if benchmark_stats is not None:
+        _benchmark_sync()
+        t0 = time.perf_counter()
     model.predict(dummy, **{**cfg_warmup, "verbose": False, "imgsz": 64})
+    if benchmark_stats is not None:
+        _benchmark_sync()
+        benchmark_stats.warmup_time = time.perf_counter() - t0
 
     # Визначення девайсу моделі (після warmup — вже на цільовому девайсі)
+    gpu_name = "N/A"
     try:
         device = next(model.model.parameters()).device
         device_name = f"{device}"
         if device.type == "cuda":
             import torch
-            device_name = f"CUDA:{device.index} ({torch.cuda.get_device_name(device.index)})"
+            gpu_name = torch.cuda.get_device_name(device.index)
+            device_name = f"CUDA:{device.index} ({gpu_name})"
     except Exception:
-        # TensorRT .engine — визначаємо з конфігу
         dev_cfg = INFERENCE_CONFIG.get("device")
         device_name = f"CUDA:{dev_cfg} (TensorRT)" if dev_cfg is not None else "TensorRT (GPU)"
 
@@ -356,10 +557,13 @@ def run_tracking(
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+    frames_to_process = total_frames
+    if benchmark_mode and BENCHMARK_MAX_FRAMES:
+        frames_to_process = min(total_frames, BENCHMARK_MAX_FRAMES)
 
     print()
     print("=" * 60)
-    print("TRACK VIDEO")
+    print("BENCHMARK: TRACKING PIPELINE" if benchmark_mode else "TRACK VIDEO")
     print("=" * 60)
     print(f"Відео: {video_input_path}")
     print(f"Вихід: {output_path}")
@@ -370,15 +574,19 @@ def run_tracking(
     print(f"Кадрів: {total_frames}, {fps:.1f} FPS, {width}x{height}")
     print(f"Детекція кожні: {detection_interval} фреймів")
     print(f"Інференс: conf={cfg.get('conf')}, iou={cfg.get('iou')}, imgsz={cfg.get('imgsz')}, max_det={cfg.get('max_det')}, half={cfg.get('half')}")
+    if benchmark_mode:
+        print(f"Benchmark: CUDA_SYNC={BENCHMARK_CUDA_SYNC}, WRITE_VIDEO={BENCHMARK_WRITE_VIDEO}, MAX_FRAMES={BENCHMARK_MAX_FRAMES}")
     print("=" * 60)
     print()
 
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-    if not writer.isOpened():
-        print(f"Помилка: не вдалося створити вихідний файл: {output_path}")
-        cap.release()
-        return None
+    writer = None
+    if not benchmark_mode or BENCHMARK_WRITE_VIDEO:
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+        if not writer.isOpened():
+            print(f"Помилка: не вдалося створити вихідний файл: {output_path}")
+            cap.release()
+            return None
 
     tracker = None
     try:
@@ -413,22 +621,40 @@ def run_tracking(
     detection_counts = defaultdict(int)   # cls_id -> кількість детекцій
     track_durations = {}                  # (track_id, cls_id) -> тривалість (с)
     start_time = time.perf_counter()
-    pbar = tqdm(total=total_frames if total_frames else None, unit="frame", desc="Track")
+    pbar = tqdm(total=frames_to_process if frames_to_process else None, unit="frame",
+                desc="Benchmark" if benchmark_mode else "Track")
     try:
         while True:
+            if benchmark_mode and frames_to_process and frame_counter >= frames_to_process:
+                break
+            t_read_s = time.perf_counter() if benchmark_stats else 0
             ret, frame = cap.read()
+            t_read = time.perf_counter() - t_read_s if benchmark_stats else 0
             if not ret or frame is None:
                 break
             frame_counter += 1
             pbar.update(1)
             frame_h, frame_w = frame.shape[:2]
 
-            if frame_counter % detection_interval == 1 or frame_counter == 1:
+            is_det_frame = (frame_counter % detection_interval == 1 or frame_counter == 1)
+            num_detections = 0
+            t_detect = 0.0
+
+            if is_det_frame:
+                if benchmark_stats:
+                    _benchmark_sync()
+                    t_det_s = time.perf_counter()
                 detections = run_detection(model, frame, frame_w, frame_h)
+                if benchmark_stats:
+                    _benchmark_sync()
+                    t_detect = time.perf_counter() - t_det_s
+                num_detections = len(detections)
                 for d in detections:
                     cid = d.get("cls_id")
                     if cid is not None:
                         detection_counts[cid] += 1
+                if benchmark_stats:
+                    t_track_s = time.perf_counter()
                 if tracker is not None:
                     try:
                         last_tracked = tracker.update(detections, frame)
@@ -449,14 +675,23 @@ def run_tracking(
                                 "confidence": d.get("conf", 0.0),
                             })()
                         )
+                if benchmark_stats:
+                    t_track = time.perf_counter() - t_track_s
             else:
+                t_track = 0.0
+                if benchmark_stats:
+                    t_track_s = time.perf_counter()
                 if tracker is not None:
                     try:
                         last_tracked = tracker.update(None, frame)
                     except Exception:
                         pass
-                # Якщо трекера немає, last_tracked залишається з попереднього кадру (або порожній)
+                if benchmark_stats:
+                    t_track = time.perf_counter() - t_track_s
 
+            num_tracks = len(last_tracked)
+            if benchmark_stats:
+                t_draw_s = time.perf_counter()
             for obj in last_tracked:
                 cid = getattr(obj, "cls_id", None)
                 if cid is None:
@@ -469,7 +704,21 @@ def run_tracking(
                         track_durations[(tid, cid)] = last - first
 
             draw_tracks(frame, last_tracked, class_names, CLASS_COLORS)
-            writer.write(frame)
+            if benchmark_stats:
+                t_draw = time.perf_counter() - t_draw_s
+            if writer is not None:
+                if benchmark_stats:
+                    t_write_s = time.perf_counter()
+                writer.write(frame)
+                if benchmark_stats:
+                    t_write = time.perf_counter() - t_write_s
+            else:
+                t_write = 0.0 if benchmark_stats else 0
+            if benchmark_stats:
+                benchmark_stats.add_frame(
+                    t_read, t_detect, t_track, t_draw, t_write,
+                    is_det_frame, num_detections, num_tracks,
+                )
     except Exception as e:
         print(f"Помилка під час обробки: {e}")
         import traceback
@@ -477,7 +726,8 @@ def run_tracking(
     finally:
         pbar.close()
         cap.release()
-        writer.release()
+        if writer is not None:
+            writer.release()
 
     elapsed_sec = time.perf_counter() - start_time
     fps_processed = frame_counter / elapsed_sec if elapsed_sec > 0 else 0.0
@@ -575,9 +825,28 @@ def run_tracking(
     except Exception as e:
         print(f"Не вдалося записати лог: {e}")
 
+    if benchmark_mode and benchmark_stats is not None and benchmark_stats.n > 0:
+        benchmark_report = _generate_benchmark_report(
+            benchmark_stats, elapsed_sec, model_path, video_input_path,
+            device_name, gpu_name, width, height, fps,
+            frames_to_process, cfg, tracker is not None,
+        )
+        try:
+            with open(benchmark_log_path, "w", encoding="utf-8") as f:
+                f.write(benchmark_report)
+            print(f"Benchmark звіт збережено: {benchmark_log_path}")
+            print(f"\n{benchmark_report}")
+        except Exception as e:
+            print(f"Не вдалося записати benchmark звіт: {e}")
+
     print()
-    print("Готово. Вихідне відео: " + output_path)
-    return output_path
+    done_parts = [f"Лог: {log_path}"]
+    if benchmark_mode and benchmark_stats is not None and benchmark_stats.n > 0:
+        done_parts.append(f"Benchmark: {benchmark_log_path}")
+    if writer:
+        done_parts.append(f"Відео: {output_path}")
+    print("Готово. " + ", ".join(done_parts))
+    return output_path if writer else log_path
 
 
 def main():
@@ -597,13 +866,13 @@ def main():
         results = []
         for i, video_path in enumerate(video_paths, 1):
             print(f"\n[{i}/{len(video_paths)}] Обробка: {Path(video_path).name}")
-            out = run_tracking(video_path, MODEL_PATH, DETECTION_INTERVAL)
+            out = run_tracking(video_path, MODEL_PATH, DETECTION_INTERVAL, benchmark_mode=BENCHMARK_MODE)
             if out:
                 results.append(out)
         print(f"\nОпрацьовано: {len(results)}/{len(video_paths)} відео.")
         return results
     else:
-        return run_tracking(input_path, MODEL_PATH, DETECTION_INTERVAL)
+        return run_tracking(input_path, MODEL_PATH, DETECTION_INTERVAL, benchmark_mode=BENCHMARK_MODE)
 
 
 if __name__ == "__main__":
