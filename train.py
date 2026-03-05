@@ -112,7 +112,7 @@ TRAINING_CONFIG = {
     # ==========================================================================
     "epochs": 50,          # Більше епох для кращої збіжності на IR даних
     "time": None,
-    "patience": 10,
+    "patience": 0,
     "batch": 8,
     "imgsz": 1024,
     "save": True,
@@ -128,7 +128,7 @@ TRAINING_CONFIG = {
     "multi_scale": False,   # [YOLO-only] Multi-scale для кращої генералізації
     "cos_lr": True,         # Плавне косинусне згасання LR (обов'язково для IR)
     "close_mosaic": 10,     # [YOLO-only] Вимкнути mosaic пізніше для fine-tuning
-    "resume": False,
+    "resume": True,
     "amp": False,
     "fraction": 1.0,
     "profile": False,
@@ -219,50 +219,6 @@ EXPORT_CONFIG = {
     "batch": 1,                 # Batch size
     "device": 0,                # None = авто, 0 = GPU, "cpu" = CPU
 }
-
-
-def _albu_transform_to_info(t) -> dict:
-    """З об'єкта Albumentations трансформа витягує name, p та params для YAML."""
-    out = {"name": type(t).__name__, "p": getattr(t, "p", None)}
-    try:
-        names = t.get_transform_init_args_names()
-        out["params"] = {k: getattr(t, k, None) for k in names if k != "p"}
-        # tuple -> list для YAML
-        for k, v in out["params"].items():
-            if isinstance(v, tuple):
-                out["params"][k] = list(v)
-    except Exception:
-        out["params"] = {}
-    return out
-
-
-def get_albu_augmentations_info():
-    """Опис CUSTOM_TRANSFORMS для збереження в augmentations_info.yaml (один джерело — константа CUSTOM_TRANSFORMS)."""
-    if CUSTOM_TRANSFORMS is None:
-        return None
-    return {
-        "description": "Custom Albumentations pipeline (list from global CUSTOM_TRANSFORMS)",
-        "transforms": [_albu_transform_to_info(t) for t in CUSTOM_TRANSFORMS],
-    }
-
-
-def _write_augmentations_info_to_path(path: str, info: dict) -> None:
-    """Записує словник info у path (YAML)."""
-    with open(path, "w", encoding="utf-8") as f:
-        yaml.dump(info, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
-
-
-def _save_augmentations_info(save_dir: str, *, resume: bool = False) -> None:
-    """Записує опис CUSTOM_TRANSFORMS у save_dir; ім'я файлу augmentations_info_resume.yaml при resume, інакше augmentations_info.yaml."""
-    if CUSTOM_TRANSFORMS is None:
-        return
-    info = get_albu_augmentations_info()
-    if info is None:
-        return
-    name = "augmentations_info_resume.yaml" if resume else "augmentations_info.yaml"
-    path = os.path.join(save_dir, name)
-    _write_augmentations_info_to_path(path, info)
-    print(f"[Config] Опис Albumentations збережено: {path}")
 
 
 def validate_model_type() -> None:
@@ -471,13 +427,6 @@ def train_model(
     config = get_train_config(**kwargs)
     config["augmentations"] = CUSTOM_TRANSFORMS
 
-    # Бекап опису аугментацій у project/ — буде доступний навіть при перериванні тренування
-    info = get_albu_augmentations_info()
-    if info is not None:
-        latest_path = os.path.join(config["project"], "augmentations_info_latest.yaml")
-        os.makedirs(config["project"], exist_ok=True)
-        _write_augmentations_info_to_path(latest_path, info)
-
     print(f"Завантаження моделі: {model_path}")
     model = load_model(model_path)
     
@@ -524,17 +473,7 @@ def train_model(
             except OSError:
                 pass
 
-    # Фактичну теку запуску створив Ultralytics (results.save_dir); туди пишемо augmentations_info[ _resume].yaml
     save_dir = str(results.save_dir)
-    _save_augmentations_info(save_dir, resume=config.get("resume", False))
-    # Після успішного завершення прибираємо бекап із project/ — він більше не потрібен
-    latest_path = os.path.join(config["project"], "augmentations_info_latest.yaml")
-    if os.path.isfile(latest_path):
-        try:
-            os.remove(latest_path)
-        except OSError:
-            pass
-
     trained_model_path = os.path.join(save_dir, "weights", "best.pt")
 
     print("Навчання завершено!")
