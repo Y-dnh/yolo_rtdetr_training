@@ -7,6 +7,9 @@
   - "yolo"   -> ultralytics.YOLO
   - "rtdetr" -> ultralytics.RTDETR
 
+USE_SAHI=True: Slicing Aided Hyper Inference — нарізка кадру на перекриваючі фрагменти
+  для кращого виявлення дрібних об'єктів у великих кадрах.
+
 BENCHMARK_MODE=True: детальний профайлінг (час кожної фази, FPS), звіт *_benchmark.txt
 """
 
@@ -51,18 +54,18 @@ RTDETR_ONLY_INFERENCE_KEYS: set[str] = set()
 # =============================================================================
 # БАЗОВА КОНФІГУРАЦІЯ: ШЛЯХИ
 # =============================================================================
-PROJECT_NAME = "yolo26s_pretrained"
+PROJECT_NAME = "yolo26m"
 RUNS_DIR = os.path.join(BASE_DIR, "runs")
 # У WSL задай: export YOLO_DATASET_ROOT=/mnt/d/dataset_for_training
 DATASET_ROOT = os.environ.get("YOLO_DATASET_ROOT", "D:/dataset_for_training")
 PROJECT_DIR = os.path.join(RUNS_DIR, PROJECT_NAME)
 YAML_PATH = os.path.join(DATASET_ROOT, "data.yaml")
-MODEL_PATH = os.path.join(PROJECT_DIR, "baseline", "weights", "best.pt")   # TensorRT FP16 модель
+MODEL_PATH = os.path.join(PROJECT_DIR, "baseline", "weights", "best.pt")   
 
 # Вхідне відео або папка з відео для трекінгу.
 # Якщо вказана папка — опрацьовуються всі відеофайли у ній (рекурсивно не шукаємо).
-# Вихід: tracked_videos/<назва_моделі>/<ім'я_відео>_tracked.mp4 та .txt з логами.
-VIDEO_INPUT_PATH = "D:/work/test2.mp4"
+# Вихід: tracked_videos/<назва_моделі>/<ім'я_відео>_tracked.mp4 та .txt з логами
+VIDEO_INPUT_PATH = "D:/work/diff_stuff/test_videos/test2.mp4"
 
 # Розширення файлів, що вважаються відео (при вказівці папки).
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".wmv", ".flv"}
@@ -74,22 +77,40 @@ BENCHMARK_WRITE_VIDEO = True   # False = тільки профайлінг, бе
 BENCHMARK_MAX_FRAMES = None    # None = все відео
 
 # Як часто запускати детекцію: модель працює тільки на кадрах 1, 1+N, 1+2N, ...; між ними лише NanoTrack.
-DETECTION_INTERVAL = 10
+DETECTION_INTERVAL = 5
 
 # =============================================================================
 # ПАРАМЕТРИ ІНФЕРЕНСУ (model.predict)
 # =============================================================================
 INFERENCE_CONFIG = {
     "conf": 0.25,            # мінімальний confidence детекції (нижче — відкидається)
-    "iou": 0.5,              # IoU поріг для NMS (об'єднання дублікатів боксів)
-    "imgsz": 1024,           # розмір зображення на вході моделі (краще як у навчанні)
+    "iou": 0.3,              # IoU поріг для NMS (об'єднання дублікатів боксів)
+    "imgsz": (1920, 1088),    # розмір зображення на вході моделі (краще як у навчанні)
     "max_det": 300,          # максимум детекцій на один кадр
-    "half": True,            # FP16 інференс (швидше на GPU)
+    "half": False,           # FP16 інференс (швидше на GPU)
     "device": 0,             # 0 = CUDA GPU (було None — падало на CPU)
     "verbose": False,
     "agnostic_nms": False,   # [тільки YOLO] NMS без урахування класу
     "classes": None,         # фільтр класів (None = усі класи)
 }
+
+# =============================================================================
+# SAHI (Slicing Aided Hyper Inference)
+# =============================================================================
+# Розбиває зображення на перекриваючі фрагменти, запускає детекцію на кожному,
+# та об'єднує результати. Ефективно для виявлення дрібних об'єктів у великих кадрах.
+USE_SAHI = False                          # True = увімкнути SAHI, False = звичайна детекція
+
+SAHI_SLICE_WIDTH = 1024                    # ширина фрагменту (px)
+SAHI_SLICE_HEIGHT = 1024                   # висота фрагменту (px)
+SAHI_OVERLAP_WIDTH_RATIO = 0.2            # перекриття по ширині (0.0–1.0)
+SAHI_OVERLAP_HEIGHT_RATIO = 0.2           # перекриття по висоті (0.0–1.0)
+SAHI_PERFORM_STANDARD_PRED = True         # додатково запустити детекцію на повному кадрі
+SAHI_POSTPROCESS_TYPE = "NMS"             # "NMS" або "NMM" (Non-Maximum Merging)
+SAHI_POSTPROCESS_MATCH_METRIC = "IOU"     # "IOU" або "IOS" (Intersection over Smaller)
+SAHI_POSTPROCESS_MATCH_THRESHOLD = 0.5    # поріг IoU/IoS для злиття дублікатів між фрагментами
+SAHI_POSTPROCESS_CLASS_AGNOSTIC = False   # True = злиття без урахування класу
+
 
 # =============================================================================
 # NANOTRACK: ШЛЯХИ ДО ONNX-МОДЕЛЕЙ
@@ -110,11 +131,11 @@ else:
 # =============================================================================
 # Не керують тим, коли запускається детекція — лише тим, як довго живуть треки та коли їх показувати.
 
-MAX_AGE = 10        # скільки кадрів трек може жити без оновлення детекцією; після цього видаляється
+MAX_AGE = 20        # скільки кадрів трек може жити без оновлення детекцією; після цього видаляється
 MIN_HITS = 2        # мінімум попадань детекції по треку, щоб трек почали показувати (фільтр шуму)
-IOU_THRESHOLD = 0.3 # мінімальний IoU між боксом детекції та треком, щоб вважати їх одним об'єктом
-CONFIRM_THRESHOLD = 5   # після скількох попадань трек вважається «підтвердженим»
-MIN_SEC_STABLE = 1.0    # мінімальний час (сек) у полі зору, щоб трек став «стабільним»
+IOU_THRESHOLD = 0.25 # мінімальний IoU між боксом детекції та треком, щоб вважати їх одним об'єктом
+CONFIRM_THRESHOLD = 2   # після скількох попадань трек вважається «підтвердженим»
+MIN_SEC_STABLE = 0.25    # мінімальний час (сек) у полі зору, щоб трек став «стабільним»
 
 # Оптичний потік: передбачення руху треків між кадрами (швидше/точніше за багато треків).
 USE_OPTICAL_FLOW_PREDICT = True
@@ -201,13 +222,12 @@ def get_inference_config(**kwargs) -> dict:
     return filter_config(config, RTDETR_ONLY_INFERENCE_KEYS)
 
 
-def run_detection(model, frame: np.ndarray, frame_w: int, frame_h: int) -> list:
+def _run_detection_standard(model, frame: np.ndarray, frame_w: int, frame_h: int) -> list:
     """
-    Запуск детекції на кадрі. Повертає список dict з ключами 'box' (cx, cy, w, h у 0–1)
-    та 'cls_id'. Використовує INFERENCE_CONFIG.
+    Стандартна детекція на повному кадрі. Повертає список dict з ключами
+    'box' (cx, cy, w, h у 0–1) та 'cls_id'.
     """
     cfg = get_inference_config()
-    # Прибираємо None (model.predict не приймає частину ключів як None)
     cfg = {k: v for k, v in cfg.items() if v is not None}
     results = model.predict(frame, **cfg)
     detections = []
@@ -222,6 +242,189 @@ def run_detection(model, frame: np.ndarray, frame_w: int, frame_h: int) -> list:
             cy = (y1 + y2) / 2.0 / frame_h
             detections.append({"box": (cx, cy, w, h), "cls_id": cls_id, "conf": conf})
     return detections
+
+
+# ----------------------------- SAHI helpers ----------------------------------
+
+def _sahi_generate_slices(
+    img_w: int, img_h: int,
+    slice_w: int, slice_h: int,
+    overlap_w_ratio: float, overlap_h_ratio: float,
+) -> list[Tuple[int, int, int, int]]:
+    """Повертає список (x1, y1, x2, y2) координат перекриваючих фрагментів."""
+    step_x = max(1, int(slice_w * (1 - overlap_w_ratio)))
+    step_y = max(1, int(slice_h * (1 - overlap_h_ratio)))
+    slices = []
+    y = 0
+    while y < img_h:
+        x = 0
+        while x < img_w:
+            x2 = min(x + slice_w, img_w)
+            y2 = min(y + slice_h, img_h)
+            x1 = max(0, x2 - slice_w)
+            y1 = max(0, y2 - slice_h)
+            if (x1, y1, x2, y2) not in slices:
+                slices.append((x1, y1, x2, y2))
+            if x2 >= img_w:
+                break
+            x += step_x
+        if y2 >= img_h:
+            break
+        y += step_y
+    return slices
+
+
+def _sahi_compute_iou(box_a: Tuple, box_b: Tuple) -> float:
+    """IoU між двома боксами (x1, y1, x2, y2) у абсолютних координатах."""
+    x1 = max(box_a[0], box_b[0])
+    y1 = max(box_a[1], box_b[1])
+    x2 = min(box_a[2], box_b[2])
+    y2 = min(box_a[3], box_b[3])
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    area_a = (box_a[2] - box_a[0]) * (box_a[3] - box_a[1])
+    area_b = (box_b[2] - box_b[0]) * (box_b[3] - box_b[1])
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _sahi_compute_ios(box_a: Tuple, box_b: Tuple) -> float:
+    """IoS (Intersection over Smaller) між двома боксами (x1, y1, x2, y2)."""
+    x1 = max(box_a[0], box_b[0])
+    y1 = max(box_a[1], box_b[1])
+    x2 = min(box_a[2], box_b[2])
+    y2 = min(box_a[3], box_b[3])
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    area_a = (box_a[2] - box_a[0]) * (box_a[3] - box_a[1])
+    area_b = (box_b[2] - box_b[0]) * (box_b[3] - box_b[1])
+    smaller = min(area_a, area_b)
+    return inter / smaller if smaller > 0 else 0.0
+
+
+def _sahi_merge_detections(
+    detections: list,
+    match_threshold: float,
+    match_metric: str = "IOU",
+    postprocess_type: str = "NMS",
+    class_agnostic: bool = False,
+) -> list:
+    """
+    Злиття детекцій з перекриваючих фрагментів.
+    NMS — класичне Non-Maximum Suppression (залишає найкращий).
+    NMM — Non-Maximum Merging (зважене середнє координат).
+    """
+    if not detections:
+        return []
+    detections = sorted(detections, key=lambda d: d["conf"], reverse=True)
+    match_fn = _sahi_compute_ios if match_metric.upper() == "IOS" else _sahi_compute_iou
+
+    keep: list = []
+    used = [False] * len(detections)
+
+    for i in range(len(detections)):
+        if used[i]:
+            continue
+        best = detections[i]
+        used[i] = True
+        matched_boxes = [best["xyxy"]]
+        matched_confs = [best["conf"]]
+
+        for j in range(i + 1, len(detections)):
+            if used[j]:
+                continue
+            if not class_agnostic and detections[j]["cls_id"] != best["cls_id"]:
+                continue
+            score = match_fn(best["xyxy"], detections[j]["xyxy"])
+            if score >= match_threshold:
+                used[j] = True
+                matched_boxes.append(detections[j]["xyxy"])
+                matched_confs.append(detections[j]["conf"])
+
+        if postprocess_type.upper() == "NMM" and len(matched_boxes) > 1:
+            total_c = sum(matched_confs)
+            avg_x1 = sum(b[0] * c for b, c in zip(matched_boxes, matched_confs)) / total_c
+            avg_y1 = sum(b[1] * c for b, c in zip(matched_boxes, matched_confs)) / total_c
+            avg_x2 = sum(b[2] * c for b, c in zip(matched_boxes, matched_confs)) / total_c
+            avg_y2 = sum(b[3] * c for b, c in zip(matched_boxes, matched_confs)) / total_c
+            best = {**best, "xyxy": (avg_x1, avg_y1, avg_x2, avg_y2), "conf": max(matched_confs)}
+
+        keep.append(best)
+
+    return keep
+
+
+def _run_detection_sahi(model, frame: np.ndarray, frame_w: int, frame_h: int) -> list:
+    """
+    SAHI-детекція: нарізка кадру на фрагменти → інференс на кожному →
+    (опціонально) інференс на повному кадрі → злиття результатів.
+    """
+    cfg = get_inference_config()
+    cfg = {k: v for k, v in cfg.items() if v is not None}
+
+    slices = _sahi_generate_slices(
+        frame_w, frame_h,
+        SAHI_SLICE_WIDTH, SAHI_SLICE_HEIGHT,
+        SAHI_OVERLAP_WIDTH_RATIO, SAHI_OVERLAP_HEIGHT_RATIO,
+    )
+
+    raw: list = []
+
+    for (sx1, sy1, sx2, sy2) in slices:
+        patch = frame[sy1:sy2, sx1:sx2]
+        if patch.size == 0:
+            continue
+        results = model.predict(patch, **cfg)
+        for result in results:
+            for box in result.boxes:
+                bx1, by1, bx2, by2 = map(float, box.xyxy[0].cpu().numpy())
+                cls_id = int(box.cls[0])
+                conf = float(box.conf[0]) if box.conf is not None and len(box.conf) else 0.0
+                raw.append({
+                    "xyxy": (bx1 + sx1, by1 + sy1, bx2 + sx1, by2 + sy1),
+                    "cls_id": cls_id,
+                    "conf": conf,
+                })
+
+    if SAHI_PERFORM_STANDARD_PRED:
+        results = model.predict(frame, **cfg)
+        for result in results:
+            for box in result.boxes:
+                bx1, by1, bx2, by2 = map(float, box.xyxy[0].cpu().numpy())
+                cls_id = int(box.cls[0])
+                conf = float(box.conf[0]) if box.conf is not None and len(box.conf) else 0.0
+                raw.append({
+                    "xyxy": (bx1, by1, bx2, by2),
+                    "cls_id": cls_id,
+                    "conf": conf,
+                })
+
+    merged = _sahi_merge_detections(
+        raw,
+        match_threshold=SAHI_POSTPROCESS_MATCH_THRESHOLD,
+        match_metric=SAHI_POSTPROCESS_MATCH_METRIC,
+        postprocess_type=SAHI_POSTPROCESS_TYPE,
+        class_agnostic=SAHI_POSTPROCESS_CLASS_AGNOSTIC,
+    )
+
+    detections = []
+    for d in merged:
+        x1, y1, x2, y2 = d["xyxy"]
+        w = (x2 - x1) / frame_w
+        h = (y2 - y1) / frame_h
+        cx = (x1 + x2) / 2.0 / frame_w
+        cy = (y1 + y2) / 2.0 / frame_h
+        detections.append({"box": (cx, cy, w, h), "cls_id": d["cls_id"], "conf": d["conf"]})
+    return detections
+
+
+def run_detection(model, frame: np.ndarray, frame_w: int, frame_h: int) -> list:
+    """
+    Запуск детекції на кадрі. При USE_SAHI=True використовує SAHI (нарізка на фрагменти),
+    інакше — звичайний інференс на повному кадрі.
+    Повертає список dict з ключами 'box' (cx, cy, w, h у 0–1), 'cls_id', 'conf'.
+    """
+    if USE_SAHI:
+        return _run_detection_sahi(model, frame, frame_w, frame_h)
+    return _run_detection_standard(model, frame, frame_w, frame_h)
 
 
 def _vis_get_text_size(text: str) -> Tuple[int, int]:
@@ -396,10 +599,26 @@ def _generate_benchmark_report(stats: BenchmarkStats, pipeline_total: float,
         f"  Frames processed: {n} / {total_frames}",
         f"  Detection every:  {DETECTION_INTERVAL} frames",
         f"  Tracker:          {'NanoTrack v' + NANOTRACK_VERSION if has_tracker else 'None'}",
+        f"  SAHI:             {'ON' if USE_SAHI else 'OFF'}",
         f"  CUDA Sync:        {BENCHMARK_CUDA_SYNC}",
+    ]
+    if USE_SAHI:
+        n_slices = len(_sahi_generate_slices(width, height, SAHI_SLICE_WIDTH, SAHI_SLICE_HEIGHT,
+                                             SAHI_OVERLAP_WIDTH_RATIO, SAHI_OVERLAP_HEIGHT_RATIO))
+        lines.extend([
+            "",
+            f"  SAHI config:",
+            f"    Slice size:      {SAHI_SLICE_WIDTH}x{SAHI_SLICE_HEIGHT}",
+            f"    Overlap:         {SAHI_OVERLAP_WIDTH_RATIO:.0%} x {SAHI_OVERLAP_HEIGHT_RATIO:.0%}",
+            f"    Slices count:    {n_slices}",
+            f"    Full-frame pred: {SAHI_PERFORM_STANDARD_PRED}",
+            f"    Postprocess:     {SAHI_POSTPROCESS_TYPE} ({SAHI_POSTPROCESS_MATCH_METRIC}, thr={SAHI_POSTPROCESS_MATCH_THRESHOLD})",
+            f"    Class agnostic:  {SAHI_POSTPROCESS_CLASS_AGNOSTIC}",
+        ])
+    lines.extend([
         "",
         "  Inference config:",
-    ]
+    ])
     for k in ["imgsz", "conf", "iou", "half", "max_det", "device"]:
         if k in cfg:
             lines.append(f"    {k:16s} = {cfg[k]}")
@@ -580,13 +799,24 @@ def run_tracking(
     print("=" * 60)
     print(f"Відео: {video_input_path}")
     print(f"Вихід: {output_path}")
-    print(f"Модель: {Path(model_path).name}")
+    print(f"Модель: {MODEL_PATH}")
     print(f"Архітектура: {MODEL_TYPE.upper()}")
     print(f"Девайс: {device_name}")
     cfg = get_inference_config()
     print(f"Кадрів: {total_frames}, {fps:.1f} FPS, {width}x{height}")
+    print(f"Розмір інференсу: {cfg.get('imgsz')}x{cfg.get('imgsz')}")
     print(f"Детекція кожні: {detection_interval} фреймів")
     print(f"Інференс: conf={cfg.get('conf')}, iou={cfg.get('iou')}, imgsz={cfg.get('imgsz')}, max_det={cfg.get('max_det')}, half={cfg.get('half')}")
+    if USE_SAHI:
+        n_slices = len(_sahi_generate_slices(width, height, SAHI_SLICE_WIDTH, SAHI_SLICE_HEIGHT,
+                                             SAHI_OVERLAP_WIDTH_RATIO, SAHI_OVERLAP_HEIGHT_RATIO))
+        print(f"SAHI: ON  |  вікно={SAHI_SLICE_WIDTH}x{SAHI_SLICE_HEIGHT}, "
+              f"перекриття={SAHI_OVERLAP_WIDTH_RATIO:.0%}x{SAHI_OVERLAP_HEIGHT_RATIO:.0%}, "
+              f"фрагментів={n_slices}, повний_кадр={SAHI_PERFORM_STANDARD_PRED}, "
+              f"злиття={SAHI_POSTPROCESS_TYPE}({SAHI_POSTPROCESS_MATCH_METRIC}, "
+              f"thr={SAHI_POSTPROCESS_MATCH_THRESHOLD})")
+    else:
+        print("SAHI: OFF")
     if benchmark_mode:
         print(f"Benchmark: CUDA_SYNC={BENCHMARK_CUDA_SYNC}, WRITE_VIDEO={BENCHMARK_WRITE_VIDEO}, MAX_FRAMES={BENCHMARK_MAX_FRAMES}")
     print("=" * 60)
@@ -798,6 +1028,26 @@ def run_tracking(
         "",
         "--- ДЕТЕКЦІЯ ---",
         f"  DETECTION_INTERVAL: {detection_interval}  # кожні N фреймів",
+        "",
+        "--- SAHI (Slicing Aided Hyper Inference) ---",
+        f"  USE_SAHI: {USE_SAHI}",
+    ])
+    if USE_SAHI:
+        n_slices = len(_sahi_generate_slices(width, height, SAHI_SLICE_WIDTH, SAHI_SLICE_HEIGHT,
+                                             SAHI_OVERLAP_WIDTH_RATIO, SAHI_OVERLAP_HEIGHT_RATIO))
+        log_lines.extend([
+            f"  SAHI_SLICE_WIDTH: {SAHI_SLICE_WIDTH}",
+            f"  SAHI_SLICE_HEIGHT: {SAHI_SLICE_HEIGHT}",
+            f"  SAHI_OVERLAP_WIDTH_RATIO: {SAHI_OVERLAP_WIDTH_RATIO}",
+            f"  SAHI_OVERLAP_HEIGHT_RATIO: {SAHI_OVERLAP_HEIGHT_RATIO}",
+            f"  SAHI_PERFORM_STANDARD_PRED: {SAHI_PERFORM_STANDARD_PRED}",
+            f"  SAHI_POSTPROCESS_TYPE: {SAHI_POSTPROCESS_TYPE}",
+            f"  SAHI_POSTPROCESS_MATCH_METRIC: {SAHI_POSTPROCESS_MATCH_METRIC}",
+            f"  SAHI_POSTPROCESS_MATCH_THRESHOLD: {SAHI_POSTPROCESS_MATCH_THRESHOLD}",
+            f"  SAHI_POSTPROCESS_CLASS_AGNOSTIC: {SAHI_POSTPROCESS_CLASS_AGNOSTIC}",
+            f"  Кількість фрагментів: {n_slices}",
+        ])
+    log_lines.extend([
         "",
         "--- NANOTRACK ---",
         f"  NANOTRACK_BACKBONE: {NANOTRACK_BACKBONE}",
