@@ -36,12 +36,14 @@ RTDETR_ONLY_EXPORT_KEYS: set[str] = set()
 # =============================================================================
 # БАЗОВА КОНФІГУРАЦІЯ
 # =============================================================================
-PROJECT_NAME = "yolo26s"
+PROJECT_NAME = "yolo26m"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_DIR = os.path.join(BASE_DIR, PROJECT_NAME)
-DATASET_ROOT = os.path.join(BASE_DIR, "dataset_split")
-YAML_PATH = os.path.join(DATASET_ROOT, "yolo.yaml")
+RUNS_DIR = os.path.join(BASE_DIR, "runs")
+# У WSL задай: export YOLO_DATASET_ROOT=/mnt/d/dataset_for_training
+DATASET_ROOT = os.environ.get("YOLO_DATASET_ROOT", "D:/dataset_for_training")
+PROJECT_DIR = os.path.join(RUNS_DIR, PROJECT_NAME)
+YAML_PATH = os.path.join(DATASET_ROOT, "data.yaml")
 
 # Шлях до моделі для експорту
 MODEL_PATH = os.path.join(PROJECT_DIR, "baseline", "weights", "best.pt")

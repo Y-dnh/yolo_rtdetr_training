@@ -65,7 +65,7 @@ MODEL_PATH = os.path.join(PROJECT_DIR, "baseline", "weights", "best.pt")
 # Вхідне відео або папка з відео для трекінгу.
 # Якщо вказана папка — опрацьовуються всі відеофайли у ній (рекурсивно не шукаємо).
 # Вихід: tracked_videos/<назва_моделі>/<ім'я_відео>_tracked.mp4 та .txt з логами
-VIDEO_INPUT_PATH = "D:/work/diff_stuff/test_videos/test2.mp4"
+VIDEO_INPUT_PATH = "D:/work/diff_stuff/test_videos"
 
 # Розширення файлів, що вважаються відео (при вказівці папки).
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".wmv", ".flv"}
@@ -85,9 +85,9 @@ DETECTION_INTERVAL = 5
 INFERENCE_CONFIG = {
     "conf": 0.25,            # мінімальний confidence детекції (нижче — відкидається)
     "iou": 0.3,              # IoU поріг для NMS (об'єднання дублікатів боксів)
-    "imgsz": (1920, 1088),    # розмір зображення на вході моделі (краще як у навчанні)
+    "imgsz": 1024,           # (height, width) — розмір зображення на вході моделі
     "max_det": 300,          # максимум детекцій на один кадр
-    "half": False,           # FP16 інференс (швидше на GPU)
+    "half": True,            # FP16 інференс (швидше на GPU)
     "device": 0,             # 0 = CUDA GPU (було None — падало на CPU)
     "verbose": False,
     "agnostic_nms": False,   # [тільки YOLO] NMS без урахування класу
@@ -130,6 +130,10 @@ else:
 # ПАРАМЕТРИ NANOTRACKER (життя треків, злиття, ReID)
 # =============================================================================
 # Не керують тим, коли запускається детекція — лише тим, як довго живуть треки та коли їх показувати.
+
+# Ресайз кадру перед передачею в NanoTrack: None = без ресайзу (повний кадр),
+# int = зменшити до (px, px). Зменшує навантаження на CPU при великій кількості треків.
+NANO_IMAGE_RESIZE = None
 
 MAX_AGE = 20        # скільки кадрів трек може жити без оновлення детекцією; після цього видаляється
 MIN_HITS = 2        # мінімум попадань детекції по треку, щоб трек почали показувати (фільтр шуму)
@@ -590,7 +594,7 @@ def _generate_benchmark_report(stats: BenchmarkStats, pipeline_total: float,
         "  BENCHMARK REPORT: TRACKING PIPELINE PROFILING",
         "=" * 72,
         f"  Date:             {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        f"  Model:            {Path(model_path).name}",
+        f"  Model:            {MODEL_PATH}",
         f"  Architecture:     {MODEL_TYPE.upper()}",
         f"  Device:           {device_name}",
         f"  GPU:              {gpu_name}",
@@ -599,6 +603,7 @@ def _generate_benchmark_report(stats: BenchmarkStats, pipeline_total: float,
         f"  Frames processed: {n} / {total_frames}",
         f"  Detection every:  {DETECTION_INTERVAL} frames",
         f"  Tracker:          {'NanoTrack v' + NANOTRACK_VERSION if has_tracker else 'None'}",
+        f"  Tracker resize:   {f'{NANO_IMAGE_RESIZE}x{NANO_IMAGE_RESIZE}' if NANO_IMAGE_RESIZE else 'OFF (full frame)'}",
         f"  SAHI:             {'ON' if USE_SAHI else 'OFF'}",
         f"  CUDA Sync:        {BENCHMARK_CUDA_SYNC}",
     ]
@@ -731,7 +736,7 @@ def run_tracking(
     # Вихід: tracked_videos/<назва_моделі>/<ім'я_відео>_tracked.mp4 та .txt
     stem = Path(model_path).stem
     model_name = PROJECT_NAME if stem == PROJECT_NAME else f"{PROJECT_NAME}_{stem}"
-    output_dir = os.path.join(BASE_DIR, "tracked_videos", model_name)
+    output_dir = os.path.join(BASE_DIR, "tracked_videos", model_name) 
     os.makedirs(output_dir, exist_ok=True)
     video_stem = Path(video_input_path).stem
     output_path = os.path.join(output_dir, f"{video_stem}_tracked.mp4")
@@ -817,6 +822,8 @@ def run_tracking(
               f"thr={SAHI_POSTPROCESS_MATCH_THRESHOLD})")
     else:
         print("SAHI: OFF")
+    if NANO_IMAGE_RESIZE is not None:
+        print(f"NanoTrack resize: {NANO_IMAGE_RESIZE}x{NANO_IMAGE_RESIZE}")
     if benchmark_mode:
         print(f"Benchmark: CUDA_SYNC={BENCHMARK_CUDA_SYNC}, WRITE_VIDEO={BENCHMARK_WRITE_VIDEO}, MAX_FRAMES={BENCHMARK_MAX_FRAMES}")
     print("=" * 60)
@@ -879,6 +886,11 @@ def run_tracking(
             pbar.update(1)
             frame_h, frame_w = frame.shape[:2]
 
+            if NANO_IMAGE_RESIZE is not None and tracker is not None:
+                tracker_frame = cv2.resize(frame, (NANO_IMAGE_RESIZE, NANO_IMAGE_RESIZE))
+            else:
+                tracker_frame = frame
+
             is_det_frame = (frame_counter % detection_interval == 1 or frame_counter == 1)
             num_detections = 0
             t_detect = 0.0
@@ -900,7 +912,7 @@ def run_tracking(
                     t_track_s = time.perf_counter()
                 if tracker is not None:
                     try:
-                        last_tracked = tracker.update(detections, frame)
+                        last_tracked = tracker.update(detections, tracker_frame)
                     except Exception as e:
                         print(f"Помилка трекера (кадр {frame_counter}): {e}")
                         last_tracked = []
@@ -926,7 +938,7 @@ def run_tracking(
                     t_track_s = time.perf_counter()
                 if tracker is not None:
                     try:
-                        last_tracked = tracker.update(None, frame)
+                        last_tracked = tracker.update(None, tracker_frame)
                     except Exception:
                         pass
                 if benchmark_stats:
@@ -1052,6 +1064,7 @@ def run_tracking(
         "--- NANOTRACK ---",
         f"  NANOTRACK_BACKBONE: {NANOTRACK_BACKBONE}",
         f"  NANOTRACK_NECKHEAD: {NANOTRACK_NECKHEAD}",
+        f"  NANO_IMAGE_RESIZE: {NANO_IMAGE_RESIZE}",
         "",
         "--- ПАРАМЕТРИ ТРЕКИНГУ (NanoTracker) ---",
         f"  MAX_AGE: {MAX_AGE}",
