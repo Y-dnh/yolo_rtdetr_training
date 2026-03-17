@@ -54,18 +54,18 @@ RTDETR_ONLY_INFERENCE_KEYS: set[str] = set()
 # =============================================================================
 # БАЗОВА КОНФІГУРАЦІЯ: ШЛЯХИ
 # =============================================================================
-PROJECT_NAME = "yolo26m"
+PROJECT_NAME = "yolo26n_drones"
 RUNS_DIR = os.path.join(BASE_DIR, "runs")
 # У WSL задай: export YOLO_DATASET_ROOT=/mnt/d/dataset_for_training
-DATASET_ROOT = os.environ.get("YOLO_DATASET_ROOT", "D:/dataset_for_training")
+DATASET_ROOT = os.environ.get("YOLO_DATASET_ROOT", "D:/work/diff_stuff/dataset_for_training/thermal_drones")
 PROJECT_DIR = os.path.join(RUNS_DIR, PROJECT_NAME)
 YAML_PATH = os.path.join(DATASET_ROOT, "data.yaml")
-MODEL_PATH = os.path.join(PROJECT_DIR, "baseline", "weights", "best.pt")   
+MODEL_PATH = os.path.join(PROJECT_DIR, "baseline_wo_crop", "weights", "best.pt")   
 
 # Вхідне відео або папка з відео для трекінгу.
 # Якщо вказана папка — опрацьовуються всі відеофайли у ній (рекурсивно не шукаємо).
 # Вихід: tracked_videos/<назва_моделі>/<ім'я_відео>_tracked.mp4 та .txt з логами
-VIDEO_INPUT_PATH = "D:/work/diff_stuff/test_videos"
+VIDEO_INPUT_PATH = "D:/work/diff_stuff/video_for_test_fly/test_video/test"
 
 # Розширення файлів, що вважаються відео (при вказівці папки).
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".wmv", ".flv"}
@@ -77,7 +77,7 @@ BENCHMARK_WRITE_VIDEO = True   # False = тільки профайлінг, бе
 BENCHMARK_MAX_FRAMES = None    # None = все відео
 
 # Як часто запускати детекцію: модель працює тільки на кадрах 1, 1+N, 1+2N, ...; між ними лише NanoTrack.
-DETECTION_INTERVAL = 5
+DETECTION_INTERVAL = 2
 
 # =============================================================================
 # ПАРАМЕТРИ ІНФЕРЕНСУ (model.predict)
@@ -85,7 +85,7 @@ DETECTION_INTERVAL = 5
 INFERENCE_CONFIG = {
     "conf": 0.25,            # мінімальний confidence детекції (нижче — відкидається)
     "iou": 0.3,              # IoU поріг для NMS (об'єднання дублікатів боксів)
-    "imgsz": 1024,           # (height, width) — розмір зображення на вході моделі
+    "imgsz": 320,           # (height, width) — розмір зображення на вході моделі
     "max_det": 300,          # максимум детекцій на один кадр
     "half": True,            # FP16 інференс (швидше на GPU)
     "device": 0,             # 0 = CUDA GPU (було None — падало на CPU)
@@ -736,7 +736,7 @@ def run_tracking(
     # Вихід: tracked_videos/<назва_моделі>/<ім'я_відео>_tracked.mp4 та .txt
     stem = Path(model_path).stem
     model_name = PROJECT_NAME if stem == PROJECT_NAME else f"{PROJECT_NAME}_{stem}"
-    output_dir = os.path.join(BASE_DIR, "tracked_videos", model_name) 
+    output_dir = os.path.join(BASE_DIR, "tracked_videos", model_name, "1024") 
     os.makedirs(output_dir, exist_ok=True)
     video_stem = Path(video_input_path).stem
     output_path = os.path.join(output_dir, f"{video_stem}_tracked.mp4")

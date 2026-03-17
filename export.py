@@ -36,7 +36,7 @@ RTDETR_ONLY_EXPORT_KEYS: set[str] = set()
 # =============================================================================
 # БАЗОВА КОНФІГУРАЦІЯ
 # =============================================================================
-PROJECT_NAME = "yolo26m"
+PROJECT_NAME = "yolo26n_drones"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 RUNS_DIR = os.path.join(BASE_DIR, "runs")
@@ -46,7 +46,7 @@ PROJECT_DIR = os.path.join(RUNS_DIR, PROJECT_NAME)
 YAML_PATH = os.path.join(DATASET_ROOT, "data.yaml")
 
 # Шлях до моделі для експорту
-MODEL_PATH = os.path.join(PROJECT_DIR, "baseline", "weights", "best.pt")
+MODEL_PATH = os.path.join(PROJECT_DIR, "baseline_wo_crop", "weights", "best.pt")
 
 
 # =============================================================================
@@ -54,9 +54,9 @@ MODEL_PATH = os.path.join(PROJECT_DIR, "baseline", "weights", "best.pt")
 # Документація: https://docs.ultralytics.com/modes/export/#arguments
 # =============================================================================
 EXPORT_CONFIG = {
-    "format": "engine",
+    "format": "onnx",
     
-    "imgsz": (1024, 1024),
+    "imgsz": 320,
     "half": True,
     "int8": False,
     "optimize": False,

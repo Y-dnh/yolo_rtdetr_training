@@ -43,8 +43,8 @@ MODEL_TYPE = "yolo"        # <-- ПЕРЕМИКАЧ: "yolo" або "rtdetr"
 SEED = 42
 
 # --- YOLO конфіг ---
-PROJECT_NAME = "yolo26m"
-PRETRAINED_MODEL = "yolo26m.pt"
+PROJECT_NAME = "yolo26n_p2"
+PRETRAINED_MODEL = "runs\\yolo26n_drones\\baseline_wo_crop\\weights\\best.pt"
 
 # --- Transfer Learning для YAML моделей (P2/P6 та інші кастомні архітектури) ---
 # Якщо True і model_path є .yaml файл — автоматично завантажить базові ваги (.pt)
@@ -62,7 +62,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 RUNS_DIR = os.path.join(BASE_DIR, "runs")
 # DATASET_ROOT = os.path.join(BASE_DIR, "dataset_split")
 # У WSL задай: export YOLO_DATASET_ROOT=/mnt/d/dataset_for_training
-DATASET_ROOT = os.environ.get("YOLO_DATASET_ROOT", "D:/dataset_for_training")
+DATASET_ROOT = os.environ.get("YOLO_DATASET_ROOT", "D:/work/diff_stuff/dataset_for_training/thermal_drones/")
 PROJECT_DIR = os.path.join(RUNS_DIR, PROJECT_NAME)
 YAML_PATH = os.path.join(DATASET_ROOT, "data.yaml")
 
@@ -110,16 +110,16 @@ TRAINING_CONFIG = {
     # ==========================================================================
     # ЗАГАЛЬНІ ПАРАМЕТРИ НАВЧАННЯ ДЛЯ IR (ТЕПЛОВІЗІЙНИХ) ЗОБРАЖЕНЬ
     # ==========================================================================
-    "epochs": 50,          # Більше епох для кращої збіжності на IR даних
+    "epochs": 100,          # Більше епох для кращої збіжності на IR даних
     "time": None,
     "patience": 0,
-    "batch": 8,
-    "imgsz": 1024,
+    "batch": 64,
+    "imgsz": 320,
     "save": True,
     "save_period": -1,
     "cache": False,
     "device": 0,
-    "workers": 12,
+    "workers": 2,
     "seed": SEED,
     "deterministic": True,
     "single_cls": False,
@@ -141,12 +141,12 @@ TRAINING_CONFIG = {
     # ОПТИМІЗАТОР ТА LEARNING RATE ДЛЯ IR ЗОБРАЖЕНЬ
     # ==========================================================================
     "pretrained": True,
-    "optimizer": "SGD",       # SGD для глибшого та плавнішого пошуку мінімуму
-    "lr0": 0.005,             # Стартовий LR для SGD
+    "optimizer": "AdamW",       # SGD для глибшого та плавнішого пошуку мінімуму
+    "lr0": 0.001,             # Стартовий LR для SGD
     "lrf": 0.01,              # Кінцевий LR
     "momentum": 0.937,
-    "weight_decay": 0.001,    # Посилений штраф для боротьби з оверфітом
-    "warmup_epochs": 5.0,     # RT-DETR рекомендовано: 5.0 (більше warmup для трансформера)
+    "weight_decay": 0.005,    # Посилений штраф для боротьби з оверфітом
+    "warmup_epochs": 3.0,     # RT-DETR рекомендовано: 5.0 (більше warmup для трансформера)
     "warmup_momentum": 0.5,
     "warmup_bias_lr": 0.01,
 
@@ -155,7 +155,7 @@ TRAINING_CONFIG = {
     # YOLO: box + cls + dfl
     # RT-DETR: Hungarian matching + GIOU + L1 + CE (dfl/nbs/overlap_mask/... ігноруються)
     # ==========================================================================
-    "box": 10.0,            # Пріоритет на точність рамок (мікро-об'єкти)
+    "box": 8.0,            # Пріоритет на точність рамок (мікро-об'єкти)
     "cls": 1.0,
     "dfl": 2.0,             # [YOLO-only] Ідеальне облягання країв об'єктів
     "pose": 12.0,           # [YOLO-only] Pose estimation loss weight
@@ -173,16 +173,16 @@ TRAINING_CONFIG = {
 AUGMENTATION_CONFIG = {
     "hsv_h": 0.0,
     "hsv_s": 0.0,
-    "hsv_v": 0.6,
+    "hsv_v": 0.0,
     "degrees": 5.0,
-    "translate": 0.2,
-    "scale": 0.25,
-    "shear": 2.0,
+    "translate": 0.1,
+    "scale": 0.0,
+    "shear": 1.0,
     "perspective": 0.0,
     "flipud": 0.0,
-    "fliplr": 0.5,
+    "fliplr": 0.0,
     "bgr": 0.0,
-    "mosaic": 1.0,
+    "mosaic": 0.0,
     "mixup": 0.0,
     "cutmix": 0.0,
     "copy_paste": 0.0,
@@ -194,12 +194,34 @@ AUGMENTATION_CONFIG = {
 # Уніфікований пайплайн Albumentations; передається в model.train(augmentations=CUSTOM_TRANSFORMS)
 # Albumentations 2.x: GaussNoise — std_range (не var_limit); RandomFog — fog_coef_range (не fog_coef_lower/upper)
 CUSTOM_TRANSFORMS = [
-    A.CLAHE(clip_limit=4.0, tile_grid_size=(8, 8), p=0.4),
-    A.RandomGamma(gamma_limit=(80, 120), p=0.3),
-    A.GaussNoise(std_range=(0.05, 0.2), p=0.4),
-    A.ISONoise(color_shift=(0.01, 0.01), intensity=(0.1, 0.5), p=0.3),
-    A.RandomFog(fog_coef_range=(0.1, 0.3), alpha_coef=0.1, p=0.2),
-    A.PixelDropout(dropout_prob=0.01, per_channel=False, p=0.2),
+    A.HorizontalFlip(p=0.5),
+
+    A.CLAHE(
+        clip_limit=(1.0, 3.0),
+        tile_grid_size=(8, 8),
+        p=0.20
+    ),
+
+    A.RandomGamma(
+        gamma_limit=(92, 108),
+        p=0.18
+    ),
+
+    A.RandomBrightnessContrast(
+        brightness_limit=0.08,
+        contrast_limit=0.10,
+        p=0.22
+    ),
+
+    A.OneOf([
+        A.GaussianBlur(blur_limit=(3, 5), p=1.0),
+        A.MotionBlur(blur_limit=(3, 5), p=1.0),
+    ], p=0.08),
+
+    A.GaussNoise(
+        std_range=(0.01, 0.035),
+        p=0.10
+    ),
 ]
 
 
@@ -210,7 +232,7 @@ CUSTOM_TRANSFORMS = [
 # =============================================================================
 EXPORT_CONFIG = {
     "format": "onnx",
-    "imgsz": 1024,              # Розмір входу (має відповідати imgsz з навчання)
+    "imgsz": 320,              # Розмір входу (має відповідати imgsz з навчання)
     "half": True,               # FP16 — зменшує розмір, прискорює інференс на GPU
     "dynamic": False,           # Динамічний розмір входу при інференсі
     "simplify": True,           # Спрощення графу через onnxslim
