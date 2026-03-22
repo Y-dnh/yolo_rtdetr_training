@@ -10,8 +10,17 @@
 """
 
 import os
+import tempfile
 from pathlib import Path
 from datetime import datetime
+
+try:
+    import yaml
+except ModuleNotFoundError:
+    # Фоллбек для випадків, коли PyYAML не встановлено або пошкоджено
+    import sys
+    print("Warning: PyYAML not found, attempting to continue without it.")
+
 from ultralytics import YOLO, RTDETR
 
 
@@ -41,24 +50,23 @@ PROJECT_NAME = "yolo26n_drones"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 RUNS_DIR = os.path.join(BASE_DIR, "runs")
 # У WSL задай: export YOLO_DATASET_ROOT=/mnt/d/dataset_for_training
-DATASET_ROOT = os.environ.get("YOLO_DATASET_ROOT", "D:/dataset_for_training")
+DATASET_ROOT = os.environ.get("YOLO_DATASET_ROOT", "D:/work/diff_stuff/dataset_for_training/thermal_drones")
 PROJECT_DIR = os.path.join(RUNS_DIR, PROJECT_NAME)
 YAML_PATH = os.path.join(DATASET_ROOT, "data.yaml")
 
 # Шлях до моделі для експорту
-MODEL_PATH = os.path.join(PROJECT_DIR, "baseline_wo_crop", "weights", "best.pt")
-
+MODEL_PATH = os.path.join(PROJECT_DIR, "baseline_wo_crop", "weights", "yolo26n_p2.pt")
 
 # =============================================================================
 # КОНФІГУРАЦІЯ ЕКСПОРТУ
 # Документація: https://docs.ultralytics.com/modes/export/#arguments
 # =============================================================================
 EXPORT_CONFIG = {
-    "format": "onnx",
+    "format": "openvino",
     
     "imgsz": 320,
     "half": True,
-    "int8": False,
+    "int8": True,
     "optimize": False,
     "dynamic": False,
     "simplify": True,
@@ -67,7 +75,7 @@ EXPORT_CONFIG = {
     "nms": False,               # [YOLO-only] Вбудувати NMS (RT-DETR: NMS-free архітектура)
     "batch": 1,
     "device": None,
-    "data": None,
+    "data": YAML_PATH,
     "fraction": 1.0,
     "keras": False,
     "end2end": None,
@@ -203,10 +211,38 @@ def export_model(
     start_time = datetime.now()
     print(f"[Export] Завантаження моделі: {Path(model_path).name}")
     
+    # Виправляємо шлях до датасету (аналогічно train.py)
+    tmp_yaml = None
+    data_yaml_path = export_params.get("data")
+    
+    if data_yaml_path and os.path.exists(data_yaml_path):
+        try:
+            with open(data_yaml_path, "r", encoding="utf-8") as f:
+                data_cfg = yaml.safe_load(f)
+            
+            # Підставляємо абсолютний шлях до кореня датасету
+            data_cfg["path"] = os.path.abspath(DATASET_ROOT)
+            
+            tmp_fd, tmp_yaml = tempfile.mkstemp(suffix=".yaml", prefix="yolo_export_data_")
+            os.close(tmp_fd)
+            
+            with open(tmp_yaml, "w", encoding="utf-8") as f:
+                yaml.dump(data_cfg, f, default_flow_style=False, allow_unicode=True)
+            
+            export_params["data"] = tmp_yaml
+            print(f"[Export] Використовується тимчасовий конфіг датасету: {tmp_yaml}")
+        except Exception as e:
+            print(f"[Export] Попередження: Не вдалося підготувати тимчасовий YAML: {e}")
+
     try:
         model = load_model(model_path)
         print(f"[Export] Експорт у формат '{config['format']}'...")
         
+        # Вимикаємо half якщо int8 увімкнено (вони несумісні)
+        if export_params.get("int8") and export_params.get("half"):
+            print("[Export] half=True і int8=True несумісні. Встановлено half=False.")
+            export_params["half"] = False
+
         exported_path = model.export(**export_params)
         
         export_time = (datetime.now() - start_time).total_seconds()
@@ -240,6 +276,13 @@ def export_model(
     except Exception as e:
         print(f"\nПомилка під час експорту: {e}")
         return None
+    finally:
+        # Прибираємо тимчасовий файл
+        if tmp_yaml and os.path.isfile(tmp_yaml):
+            try:
+                os.remove(tmp_yaml)
+            except OSError:
+                pass
 
 
 def main():
